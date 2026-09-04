@@ -1,0 +1,54 @@
+﻿# Python 缓存
+__pycache__/
+*.py[cod]
+
+# Python 虚拟环境
+.venv/
+venv/
+
+# 环境变量和密钥
+.env
+.env.*
+*.key
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地临时文件
+.scratch/
+
+# 生成的输出
+artifacts/
+
+# Python 测试与质量工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / 前端依赖与构建产物
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# 允许提交环境变量示例，但不提交真实密钥
+!.env.example
+
+# 本地日志、运行数据与数据库
+*.log
+data/raw/
+data/processed/
+*.db
+*.sqlite
+*.sqlite3
+
+# 原始比赛资料：仅限本地使用，不进入版本库
+/赛题 1：数据共情者-业务数据.xlsx
+/赛题 1：数据共情者-客服工作台示说明.docx
+/【PPT模版】BEAUTY TECHATHON/
+/docs/【PPT模版】BEAUTY TECHATHON.pptx
