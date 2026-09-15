@@ -23,6 +23,10 @@ Thumbs.db
 # 生成的输出
 artifacts/
 
+# 项目文档：Git 中仅保留根目录 README.md
+*.md
+!/README.md
+
 # Python 测试与质量工具缓存
 .pytest_cache/
 .mypy_cache/
