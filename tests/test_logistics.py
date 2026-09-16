@@ -54,10 +54,9 @@ class LogisticsTests(unittest.TestCase):
             with patch.dict(os.environ, {"COPILOT_STATE_PATH": str(path)}):
                 page = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
                 page.selectbox(key="case_session").set_value("S00001").run()
-                page.select_slider[0].set_value(3).run()
                 self.assertFalse(page.exception)
+                self.assertEqual(len(page.chat_message), len(self.provider.messages("S00001")))
                 self.assertTrue(any("图片" in item.value for item in page.warning))
-                page.selectbox(key="extra_time_S00001").set_value("2026-05-05 10:29:45").run()
                 self.assertFalse(page.exception)
                 page.text_input(key="review_operator").set_value("客服")
                 page.text_input(key="review_owner").set_value("售后")

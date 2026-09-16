@@ -82,15 +82,16 @@ class ReviewTests(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
         from copilot.agent import run_case
         from copilot.data import ExcelProvider
-        result = run_case(ExcelProvider(), "S00268")
+        provider = ExcelProvider()
+        result = run_case(provider, "S00268", provider.messages("S00268")[-1]["发送时间"])
         with patch.dict(os.environ, {"COPILOT_STATE_PATH": str(self.path)}):
             page = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
             page.session_state["model_draft"] = (
                 "S00268", result["case"]["cutoff"],
                 {"status": "model", "text": "模型原稿", "notice": "测试模型"})
             page.run()
-            page.selectbox(key="review_source_S00268_1").set_value("模型辅助草稿").run()
-            page.text_area(key="model_S00268_1").set_value("人工修改稿").run()
+            page.selectbox(key="review_source_S00268_history").set_value("模型辅助草稿").run()
+            page.text_area(key="model_S00268_history").set_value("人工修改稿").run()
             page.selectbox(key="review_decision").set_value("修改后确认")
             page.text_input(key="review_operator").set_value("客服甲")
             page.text_input(key="review_owner").set_value("主管乙")

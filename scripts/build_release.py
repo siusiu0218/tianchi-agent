@@ -17,6 +17,7 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     paths = [ROOT / n for n in ("app.py", "run.ps1", "requirements.txt", "requirements-lock.txt", "RELEASE_GUIDE.md")]
+    paths.append(ROOT / ".streamlit" / "config.toml")
     paths += sorted((ROOT / "copilot").glob("*.py"))
     paths += sorted((ROOT / "tests").glob("*.py"))
     paths += sorted((ROOT / "scripts").glob("*.py"))

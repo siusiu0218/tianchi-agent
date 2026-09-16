@@ -144,13 +144,12 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(len(page.exception), 0)
         self.assertEqual(page.selectbox(key="case_session").value, "S00268")
         self.assertIn("P0", page.error[0].value)
-        page.select_slider[0].set_value(3).run()
-        self.assertEqual(len(page.exception), 0)
-        self.assertEqual(len(page.chat_message), 3)
+        self.assertEqual(len(page.select_slider), 0)
+        self.assertEqual(len(page.chat_message), len(self.provider.messages("S00268")))
         page.selectbox(key="case_session").set_value("S00001").run()
         self.assertEqual(len(page.exception), 0)
         with patch("copilot.llm.requests.post", side_effect=requests.Timeout):
-            page.button[0].click().run()
+            page.button(key="generate_model").click().run()
         self.assertEqual(len(page.exception), 0)
 
 

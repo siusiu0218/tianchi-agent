@@ -1,0 +1,28 @@
+# Native theme, inspired by the restrained shadcn/ui dashboard palette.
+# Use local system fonts so the workbench does not need a font CDN.
+[theme]
+base = "light"
+primaryColor = "#3478F6"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F8FA"
+textColor = "#293344"
+linkColor = "#3478F6"
+borderColor = "#E7EAF0"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "10px"
+buttonRadius = "8px"
+font = "'Segoe UI', 'Microsoft YaHei', sans-serif"
+baseFontSize = 14
+headingFontSizes = ["26px", "21px", "17px", "17px", "15px", "14px"]
+headingFontWeights = [650, 600, 600, 600, 600, 600]
+dataframeHeaderBackgroundColor = "#F7F8FA"
+dataframeBorderColor = "#E7EAF0"
+
+[theme.sidebar]
+backgroundColor = "#F7F8FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#293344"
+borderColor = "#E7EAF0"
+primaryColor = "#3478F6"
+

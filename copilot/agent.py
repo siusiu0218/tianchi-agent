@@ -54,14 +54,14 @@ def compose(case: dict, risk: dict, opening_id: str) -> str:
         facts.append(f"关联订单 {order['订单号']} 的商品为“{order['商品名称']}”。")
     if not facts:
         facts.append("当前可见记录中暂未查询到关联订单，需要进一步核实。")
-    facts.append(f"当前回放时点可查到 {len(case['tickets'])} 张已创建工单，处理进度需另行核实。")
+    facts.append(f"截至会话记录时间可查到 {len(case['tickets'])} 张已创建工单，处理进度需另行核实。")
     action = ("建议由客服优先核实并转交专业人员跟进；具体处理方案需人工确认。"
               if risk["level"] == "P0" else "建议由客服核实诉求与处理进度，再确认下一步安排。")
     service = service_summary(case)
     if service and risk["level"] != "P0":
         tickets = service["replacement_tickets"]
         facts.append("可查到补发换货工单：" + "、".join(t["工单号"] for t in tickets) + "，不代表已经发货。"
-                     if tickets else "当前回放时点尚未查到已创建的补发换货工单，需人工核对。")
+                     if tickets else "截至会话记录时间尚未查到已创建的补发换货工单，需人工核对。")
         facts.extend([service["original_logistics"], service["replacement_logistics"], service["image_notice"]])
         action = service["next_step"]
     return OPENINGS[opening_id] + "\n\n" + "".join(facts) + "\n\n" + action
