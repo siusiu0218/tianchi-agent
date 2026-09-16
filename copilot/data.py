@@ -80,3 +80,17 @@ class ExcelProvider:
             for row in frame.loc[frame["会话ID"].eq(session_id)].to_dict("records"):
                 rows.append({"工单类别": sheet, **{key: row.get(key, "") for key in fields}})
         return rows
+
+    def logistics_snapshot(self, session_id: str) -> dict:
+        """Display-only logistics; mutable tracking fields never enter get_case."""
+        orders = self.frames["订单"]
+        original = [{"订单号": row["订单号"], "快递公司": row.get("快递公司", ""),
+                     "原订单物流单号": row.get("物流单号", ""), "发货时间": row.get("发货时间", "")}
+                    for row in orders.loc[orders["会话ID"].eq(session_id)].to_dict("records")]
+        replacement = []
+        if "补发换货工单" in self.frames:
+            frame = self.frames["补发换货工单"]
+            for row in frame.loc[frame["会话ID"].eq(session_id)].to_dict("records"):
+                fields = ("工单号", "关联订单号", "创建时间", "原订单物流单号", "补发物流单号", "快递公司")
+                replacement.append({key: row.get(key, "") for key in fields})
+        return {"original": original, "replacement": replacement}

@@ -5,11 +5,14 @@ from __future__ import annotations
 import re
 
 from copilot.data import CaseProvider
+from copilot.service import service_summary
 
 # These are conservative prototype rules, not clinically validated classifications.
-SYMPTOMS = ("红肿", "刺痛", "过敏", "起疹", "肿胀", "瘙痒", "烂脸", "不良反应")
+RULE_VERSION = "prototype-3"
+SYMPTOMS = ("红肿", "刺痛", "过敏", "起疹", "肿胀", "瘙痒", "烂脸", "不良反应",
+            "发红", "疹子", "又红又痒", "爆痘", "小痘痘")
 MEDICAL = ("医院", "就医", "急诊", "呼吸困难")
-SERVICE = ("投诉", "12315", "一直没", "还没收到", "破损", "少件", "漏发", "换货", "退款")
+SERVICE = ("投诉", "12315", "一直没", "还没收到", "破损", "坏的", "按不出来", "少件", "漏发", "换货", "补发", "退款")
 OPENINGS = {
     "discomfort": "很抱歉您遇到这样的使用体验，您反馈的不适需要认真核实。",
     "waiting": "理解您等待处理的着急心情，也很抱歉给您带来困扰。",
@@ -42,7 +45,7 @@ def assess(case: dict) -> dict:
         level, reason, evidence = "待核实", "当前规则未命中；不代表没有风险。", []
     unique = {item["message_id"]: item for item in evidence}
     return {"level": level, "reason": reason, "evidence": list(unique.values()),
-            "rule_version": "prototype-1", "requires_human_review": True}
+            "rule_version": RULE_VERSION, "requires_human_review": True}
 
 
 def compose(case: dict, risk: dict, opening_id: str) -> str:
@@ -54,6 +57,13 @@ def compose(case: dict, risk: dict, opening_id: str) -> str:
     facts.append(f"当前回放时点可查到 {len(case['tickets'])} 张已创建工单，处理进度需另行核实。")
     action = ("建议由客服优先核实并转交专业人员跟进；具体处理方案需人工确认。"
               if risk["level"] == "P0" else "建议由客服核实诉求与处理进度，再确认下一步安排。")
+    service = service_summary(case)
+    if service and risk["level"] != "P0":
+        tickets = service["replacement_tickets"]
+        facts.append("可查到补发换货工单：" + "、".join(t["工单号"] for t in tickets) + "，不代表已经发货。"
+                     if tickets else "当前回放时点尚未查到已创建的补发换货工单，需人工核对。")
+        facts.extend([service["original_logistics"], service["replacement_logistics"], service["image_notice"]])
+        action = service["next_step"]
     return OPENINGS[opening_id] + "\n\n" + "".join(facts) + "\n\n" + action
 
 
@@ -61,6 +71,6 @@ def run_case(provider: CaseProvider, session_id: str, cutoff: str | None = None)
     case = provider.get_case(session_id, cutoff)
     risk = assess(case)
     opening = "discomfort" if risk["level"] == "P0" else "waiting" if risk["level"] == "P1" else "neutral"
-    return {"case": case, "risk": risk, "draft": compose(case, risk, opening),
+    return {"case": case, "risk": risk, "service": service_summary(case), "draft": compose(case, risk, opening),
             "draft_source": "本地模板（未调用大模型）", "action_status": "draft_only",
             "trace": ["读取可见聊天", "查询关联订单", "查询已创建工单", "执行提醒规则", "生成待人工审阅草稿"]}

@@ -12,6 +12,8 @@ import requests
 
 from copilot.agent import OPENINGS, compose
 
+PROMPT_VERSION = "opening-selector-1"
+
 
 @dataclass(frozen=True)
 class ModelConfig:

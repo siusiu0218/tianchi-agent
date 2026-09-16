@@ -142,14 +142,15 @@ class WorkbookTests(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
         page = AppTest.from_file(str(ROOT / "app.py"), default_timeout=20).run()
         self.assertEqual(len(page.exception), 0)
-        self.assertEqual(page.selectbox[0].value, "S00268")
+        self.assertEqual(page.selectbox(key="case_session").value, "S00268")
         self.assertIn("P0", page.error[0].value)
         page.select_slider[0].set_value(3).run()
         self.assertEqual(len(page.exception), 0)
         self.assertEqual(len(page.chat_message), 3)
-        page.selectbox[0].set_value("S00001").run()
+        page.selectbox(key="case_session").set_value("S00001").run()
         self.assertEqual(len(page.exception), 0)
-        page.button[0].click().run()
+        with patch("copilot.llm.requests.post", side_effect=requests.Timeout):
+            page.button[0].click().run()
         self.assertEqual(len(page.exception), 0)
 
 
