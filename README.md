@@ -1,5 +1,7 @@
 # 共情副驾：美妆客服 AI 智能助手
 
+> 2026-09-17 新增 Windows 原生桌面版：安装包位于 `release/desktop/EmpathyCopilot-Setup.exe`，便携程序位于 `release/desktop/EmpathyCopilot/EmpathyCopilot.exe`。首次打开点击“选择 Excel”载入业务文件；无需浏览器或单独安装 Python。源码入口为 `python -m desktop`，依赖见 `requirements-desktop.txt`。桌面版审核记录保存在 `%LOCALAPPDATA%\EmpathyCopilot`，不自动导入网页版记录。完整本地操作说明见 `DESKTOP_GUIDE.md`。
+
 > 2026-09-16 当前可运行版本：v0.1。本地审核、任务看板和两个场景已实现。启动及验收请先看 [运行与演示指南](RELEASE_GUIDE.md)；以下内容包含早期产品规划，未全部实现。模型目前仅选择开场语，未实现自由生成或真实业务执行。
 
 > 欧莱雅第二届美妆科技黑客松——赛题 1「数据共情者：消费者的 AI 管家」参赛项目指导文件
