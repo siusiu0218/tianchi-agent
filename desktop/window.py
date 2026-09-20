@@ -135,6 +135,48 @@ class ReviewDialog(QDialog):
         self.accept()
 
 
+class ReplyDialog(QDialog):
+    def __init__(self, parent, session, content):
+        super().__init__(parent)
+        self.session = session
+        self.setWindowTitle("回复客户（本地模拟）")
+        self.resize(600, 450)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(label("回复客户", "pageTitle"))
+        layout.addWidget(label(session + "  ·  已通过人工审核", "pill"))
+        layout.addWidget(label("当前未接入真实客服渠道；确认后只会记录为本地模拟发送，并显示在本会话中。", "muted"))
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setPlainText(content)
+        layout.addWidget(preview)
+        form = QFormLayout()
+        self.operator = QLineEdit()
+        form.addRow("操作人", self.operator)
+        layout.addLayout(form)
+        self.confirm = QCheckBox("我已核对内容，确认执行本地模拟回复")
+        layout.addWidget(self.confirm)
+        self.operator.textChanged.connect(lambda: self.confirm.setChecked(False))
+        self.error = label("", "error")
+        layout.addWidget(self.error)
+        layout.addWidget(button("确认回复客户", self.send, True))
+
+    def send(self):
+        try:
+            message_id, created = self.parent().store.send_simulated(
+                self.session, operator=self.operator.text(), confirmed=self.confirm.isChecked())
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            return
+        except sqlite3.Error:
+            self.error.setText("记录暂时无法保存，请检查存储权限后重试。")
+            return
+        self.parent().statusBar().showMessage(
+            f"本地模拟回复 #{message_id} 已记录" if created else "该审核版本已模拟回复，未重复记录")
+        self.accept()
+
+
 class TaskDialog(QDialog):
     def __init__(self, parent, task):
         super().__init__(parent)
@@ -233,7 +275,7 @@ class MainWindow(QMainWindow):
         settings_nav = navigation_button("设置", "settings", self.configure_model)
         settings_nav.setObjectName("nav")
         rail_layout.addWidget(settings_nav)
-        version = label("0.3.2", "muted")
+        version = label("0.3.3", "muted")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         rail_layout.addWidget(version)
         outer.addWidget(rail)
@@ -261,7 +303,7 @@ class MainWindow(QMainWindow):
         self.build_inbox()
         self.build_board()
         self.tabs.currentChanged.connect(self.navigate)
-        self.statusBar().showMessage("   本地工作空间   /   人工审核后保存，不会自动发送")
+        self.statusBar().showMessage("   本地工作空间   /   审核后可执行本地模拟回复")
         self.populate_sessions()
         self.refresh_board()
 
@@ -354,6 +396,9 @@ class MainWindow(QMainWindow):
         row.addStretch()
         self.review_button = button("审核并保存  →", self.review, True)
         row.addWidget(self.review_button)
+        self.reply_button = button("回复客户  →", self.reply_customer, True)
+        self.reply_button.setToolTip("记录本地模拟回复；当前未接入真实客服渠道")
+        row.addWidget(self.reply_button)
         compose_layout.addLayout(row)
         vertical.addWidget(composer)
         vertical.setSizes([480, 255])
@@ -431,6 +476,7 @@ class MainWindow(QMainWindow):
         self.previews = {}
         self.model_button.setEnabled(self.provider is not None)
         self.review_button.setEnabled(self.provider is not None)
+        self.reply_button.setEnabled(False)
         if self.provider is None:
             return
         ids = self.provider.sessions()
@@ -468,10 +514,11 @@ class MainWindow(QMainWindow):
         self.title.setText(f"客户 {session}")
         self.conversation_meta.setText(f"{len(messages)} 条历史消息  ·  完整会话")
         self.risk_badge.setText(self.result["risk"]["level"] + "  待核实")
-        self.chat.set_messages(messages)
+        self.chat.set_messages(messages + self.simulated_chat_messages(session))
         self.original, edited, self.source = self.drafts.get(session, (self.result["draft"], self.result["draft"], "本地模板"))
         self.draft.setPlainText(edited)
-        self.source_label.setText(self.source + " · 保存后不会自动发送")
+        self.source_label.setText(self.source + " · 审核保存后可回复客户（本地模拟）")
+        self.reply_button.setEnabled(self.store.task(session) is not None)
         self.facts.show_result(self.result, self.provider)
 
     def reset_draft(self):
@@ -479,12 +526,32 @@ class MainWindow(QMainWindow):
             self.original = self.result["draft"]
             self.source = "本地模板"
             self.draft.setPlainText(self.original)
-            self.source_label.setText("本地模板 · 保存后不会自动发送")
+            self.source_label.setText("本地模板 · 审核保存后可回复客户（本地模拟）")
 
     def review(self):
         if self.result:
             ReviewDialog(self, self.result, self.original, self.draft.toPlainText(), self.source).exec()
             self.refresh_board()
+            self.reply_button.setEnabled(self.store.task(self.result["case"]["session_id"]) is not None)
+
+    def simulated_chat_messages(self, session):
+        return [dict(角色="客服", 发送时间=row["created"].replace("T", " ")[:19],
+                     内容类型="文字", image_path="", message_id=f"LOCAL-{row['id']}",
+                     message_text=row["content"] + "\n（本地模拟回复，未送达外部渠道）")
+                for row in self.store.simulated_messages(session)]
+
+    def reply_customer(self):
+        if not self.result:
+            return
+        session = self.result["case"]["session_id"]
+        task = self.store.task(session)
+        if not task:
+            QMessageBox.information(self, "请先审核", "请先点击“审核并保存”，再回复客户。")
+            return
+        content = self.store.reviewed_reply(session) or ""
+        dialog = ReplyDialog(self, session, content)
+        dialog.exec()
+        self.chat.set_messages(self.provider.messages(session) + self.simulated_chat_messages(session))
 
     def show_history(self):
         if not self.result:

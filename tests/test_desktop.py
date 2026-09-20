@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QWidget, QPush
 from copilot.data import DEFAULT_SOURCE, ExcelProvider
 from copilot.store import ReviewStore
 from desktop.config import read_settings, save_settings
-from desktop.window import MainWindow, ReviewDialog, TaskDialog
+from desktop.window import MainWindow, ReplyDialog, ReviewDialog, TaskDialog
 
 
 class DesktopTests(unittest.TestCase):
@@ -132,6 +132,25 @@ class DesktopTests(unittest.TestCase):
         rejection.confirm.setChecked(True)
         rejection.save()
         self.assertIsNone(self.store.task("S00001"))
+
+    def test_reply_button_records_only_reviewed_local_message(self):
+        self.select("S00268")
+        self.assertFalse(self.window.reply_button.isEnabled())
+        review = self.review_dialog()
+        self.fill_review(review)
+        review.save()
+        self.window.reply_button.setEnabled(True)
+        dialog = ReplyDialog(self.window, "S00268", self.store.history("S00268")[0]["edited"])
+        dialog.send()
+        self.assertEqual(self.store.simulated_messages("S00268"), [])
+        dialog.operator.setText("测试客服")
+        dialog.confirm.setChecked(True)
+        dialog.send()
+        dialog.send()
+        messages = self.store.simulated_messages("S00268")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["operator"], "测试客服")
+        self.assertIn("本地模拟回复", self.window.simulated_chat_messages("S00268")[0]["message_text"])
 
     def test_background_model_fallback_and_empty_startup(self):
         self.window.settings.update(base_url="http://localhost:9000/v1", model="test")

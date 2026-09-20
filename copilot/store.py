@@ -1,4 +1,4 @@
-"""Local review ledger. No customer messages or external tickets are sent."""
+"""Local review ledger. Customer replies remain simulated unless an external channel is added."""
 import hashlib
 import json
 import sqlite3
@@ -38,6 +38,11 @@ class ReviewStore:
                     id INTEGER PRIMARY KEY, session TEXT NOT NULL,
                     created TEXT NOT NULL, operator TEXT NOT NULL, reason TEXT NOT NULL,
                     before_state TEXT NOT NULL, after_state TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS simulated_messages (
+                    id INTEGER PRIMARY KEY, token TEXT UNIQUE NOT NULL,
+                    session TEXT NOT NULL, review_id INTEGER NOT NULL,
+                    created TEXT NOT NULL, operator TEXT NOT NULL,
+                    content TEXT NOT NULL);
             """)
 
     def connect(self):
@@ -128,6 +133,44 @@ class ReviewStore:
             return [dict(id=row["id"], created=row["created"], **json.loads(row["payload"]))
                     for row in db.execute(
                         "SELECT * FROM reviews WHERE session=? ORDER BY id DESC", (session,))]
+
+    def send_simulated(self, session, *, operator, confirmed):
+        """Record a human-confirmed local reply without claiming external delivery."""
+        if not confirmed:
+            raise ValueError("请先确认这是本地模拟回复。")
+        if not operator.strip():
+            raise ValueError("请填写操作人。")
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("""SELECT tasks.review_id, reviews.payload
+                FROM tasks JOIN reviews ON reviews.id=tasks.review_id
+                WHERE tasks.session=?""", (session,)).fetchone()
+            if not row:
+                raise ValueError("请先审核并保存回复，再回复客户。")
+            content = json.loads(row["payload"])["edited"].strip()
+            if not content:
+                raise ValueError("已审核的回复内容为空。")
+            token = hashlib.sha256(f"{session}:{row['review_id']}:{content}".encode()).hexdigest()
+            existing = db.execute("SELECT id FROM simulated_messages WHERE token=?", (token,)).fetchone()
+            if existing:
+                return existing["id"], False
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = db.execute("""INSERT INTO simulated_messages
+                (token,session,review_id,created,operator,content) VALUES(?,?,?,?,?,?)""",
+                (token, session, row["review_id"], now, operator.strip(), content))
+            return cursor.lastrowid, True
+
+    def simulated_messages(self, session):
+        with closing(self.connect()) as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM simulated_messages WHERE session=? ORDER BY id", (session,))]
+
+    def reviewed_reply(self, session):
+        """Return the exact reply attached to the current task review."""
+        with closing(self.connect()) as db:
+            row = db.execute("""SELECT reviews.payload FROM tasks
+                JOIN reviews ON reviews.id=tasks.review_id WHERE tasks.session=?""", (session,)).fetchone()
+            return json.loads(row["payload"])["edited"] if row else None
 
     def task(self, session):
         with closing(self.connect()) as db:
