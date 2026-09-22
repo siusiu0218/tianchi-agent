@@ -1,6 +1,8 @@
 """Qt widgets over the existing evidence and review services."""
 import json
 import sqlite3
+import getpass
+from uuid import uuid4
 from html import escape
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
@@ -11,9 +13,10 @@ from PySide6.QtWidgets import (
     QTabWidget, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from copilot.agent import run_case
+from copilot.agent import run_case, assess
 from copilot.data import ExcelProvider
-from copilot.llm import ModelConfig, generate_draft, model_context
+from copilot.llm import ModelConfig
+from copilot.reply_llm import generate_reply
 from copilot.store import TRANSITIONS, overdue
 from desktop.config import save_settings
 from desktop.theme import STYLE
@@ -73,13 +76,14 @@ def risk_html(risk):
 class ModelWorker(QThread):
     result_ready = Signal(object)
 
-    def __init__(self, result, config, parent=None):
+    def __init__(self, result, config, parent=None, draft='', local_messages=()):
         super().__init__(parent)
         self.result = result
         self.config = config
+        self.draft, self.local_messages = draft, local_messages
 
     def run(self):
-        self.result_ready.emit(generate_draft(self.result, self.config))
+        self.result_ready.emit(generate_reply(self.result, self.config, self.draft, self.local_messages))
 
 
 class ReviewDialog(QDialog):
@@ -246,7 +250,12 @@ class MainWindow(QMainWindow):
         self.api_key = api_key
         self.result = None
         self.worker = None
+        self.summary_worker = None
         self.drafts = {}
+        self.stale_drafts = set()
+        self.loading_draft = False
+        self.draft_revision = 0
+        self.send_token = str(uuid4())
         self.setWindowTitle("共情副驾 · 桌面工作台")
         self.resize(1440, 900)
         self.setMinimumSize(1120, 740)
@@ -275,7 +284,7 @@ class MainWindow(QMainWindow):
         settings_nav = navigation_button("设置", "settings", self.configure_model)
         settings_nav.setObjectName("nav")
         rail_layout.addWidget(settings_nav)
-        version = label("0.3.3", "muted")
+        version = label("0.5.2", "muted")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         rail_layout.addWidget(version)
         outer.addWidget(rail)
@@ -303,8 +312,11 @@ class MainWindow(QMainWindow):
         self.build_inbox()
         self.build_board()
         self.tabs.currentChanged.connect(self.navigate)
-        self.statusBar().showMessage("   本地工作空间   /   审核后可执行本地模拟回复")
+        self.statusBar().showMessage("   本地工作空间   /   编辑回复后点击模拟发送")
         self.populate_sessions()
+        self.source_timer = QTimer(self)
+        self.source_timer.timeout.connect(self.poll_source)
+        self.source_timer.start(3000)
         self.refresh_board()
 
     def navigate(self, index):
@@ -375,30 +387,29 @@ class MainWindow(QMainWindow):
         row.addWidget(label("回复草稿", "heading"))
         row.addStretch()
         self.model_button = button("✧  AI 建议", self.generate_model)
-        self.model_button.setToolTip("使用已配置模型选择开场措辞")
+        self.model_button.setToolTip("将会话和已有草稿发送到已配置的模型接口，生成回复建议")
         row.addWidget(self.model_button)
-        self.reset_button = button("重置", self.reset_draft)
+        self.reset_button = button("清空", self.reset_draft)
         self.reset_button.setObjectName("quiet")
-        self.reset_button.setToolTip("恢复本地模板")
+        self.reset_button.setToolTip("清空当前未发送的草稿")
         row.addWidget(self.reset_button)
         compose_layout.addLayout(row)
         self.draft = QTextEdit()
         self.draft.setObjectName("draft")
-        self.draft.setPlaceholderText("选择会话后，建议回复将显示在这里。")
+        self.draft.setPlaceholderText("输入回复，或点击“AI 建议”生成后修改……")
         self.draft.setAcceptRichText(False)
         compose_layout.addWidget(self.draft)
-        self.source_label = label("本地模板 · 内容待人工核对", "muted")
+        self.source_label = label("未接入真实客服渠道 · 仅本地模拟发送", "muted")
         compose_layout.addWidget(self.source_label)
         row = QHBoxLayout()
-        history_button = button("◷  审核历史", self.show_history)
+        history_button = button("◷  操作记录", self.show_history)
         history_button.setObjectName("quiet")
         row.addWidget(history_button)
         row.addStretch()
-        self.review_button = button("审核并保存  →", self.review, True)
-        row.addWidget(self.review_button)
-        self.reply_button = button("回复客户  →", self.reply_customer, True)
+        self.reply_button = button("模拟发送  →", self.reply_customer, True)
         self.reply_button.setToolTip("记录本地模拟回复；当前未接入真实客服渠道")
         row.addWidget(self.reply_button)
+        self.draft.textChanged.connect(self.draft_changed)
         compose_layout.addLayout(row)
         vertical.addWidget(composer)
         vertical.setSizes([480, 255])
@@ -407,15 +418,15 @@ class MainWindow(QMainWindow):
         right, right_layout = panel("surface")
         right.setMinimumWidth(260)
         right_layout.setContentsMargins(16, 18, 8, 8)
-        right_layout.addWidget(label("副驾洞察", "heading"))
-        right_layout.addWidget(label("会话经过、风险与业务事实", "muted"))
+        right_layout.addWidget(label("服务摘要", "heading"))
         self.facts = EvidencePanel()
+        self.facts.state_path = self.store.path
         right_layout.addWidget(self.facts)
         split.addWidget(right)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
-        split.setSizes([200, 690, 340])
+        split.setSizes([200, 610, 420])
         self.tabs.addTab(page, "会话收件箱")
 
     def build_board(self):
@@ -426,7 +437,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("聚焦需要跟进的客户问题，保留每一步处理依据。", "muted"))
         cards = QHBoxLayout()
         cards.setSpacing(14)
-        self.metric_cards = [MetricCard("已确认任务", "人工审核后创建", "#526dd4"),
+        self.metric_cards = [MetricCard("已确认任务", "确认回复后创建", "#526dd4"),
                              MetricCard("待跟进", "待处理与处理中", "#567692"),
                              MetricCard("P0 待跟进", "优先核实与升级", "#c25670"),
                              MetricCard("超时提醒", "超过本地演示阈值", "#b78a40")]
@@ -456,7 +467,7 @@ class MainWindow(QMainWindow):
         self.task_list.setItemDelegate(TaskDelegate(self.task_list))
         self.task_list.itemDoubleClicked.connect(self.edit_task)
         tasks_layout.addWidget(self.task_list)
-        self.empty_tasks = label("尚无匹配的任务\n\n在会话中审核并保存回复后，任务会出现在这里。", "muted")
+        self.empty_tasks = label("尚无匹配的任务\n\n在会话中模拟发送回复后，任务会出现在这里。", "muted")
         self.empty_tasks.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tasks_layout.addWidget(self.empty_tasks, 1)
         footer = QHBoxLayout()
@@ -475,7 +486,6 @@ class MainWindow(QMainWindow):
         self.search.clear()
         self.previews = {}
         self.model_button.setEnabled(self.provider is not None)
-        self.review_button.setEnabled(self.provider is not None)
         self.reply_button.setEnabled(False)
         if self.provider is None:
             return
@@ -502,7 +512,27 @@ class MainWindow(QMainWindow):
 
     def remember_draft(self):
         if self.result:
-            self.drafts[self.result["case"]["session_id"]] = (self.original, self.draft.toPlainText(), self.source)
+            self.store.save_composer_draft(self.draft_scope(), self.result['case']['session_id'],
+                dict(original=self.original, edited=self.draft.toPlainText(), source=self.source,
+                     token=self.send_token, fingerprint=self.draft_fingerprint))
+
+    def draft_scope(self):
+        return str(self.provider.source.resolve()).casefold()
+
+    def update_send_button(self):
+        self.reply_button.setEnabled(bool(self.result and self.draft.toPlainText().strip()
+            and self.result['case']['session_id'] not in self.stale_drafts))
+
+    def draft_changed(self):
+        if self.loading_draft or not self.result:
+            return
+        self.draft_revision += 1
+        self.send_token = str(uuid4())
+        self.update_send_button()
+        try:
+            self.remember_draft()
+        except (sqlite3.Error, OSError):
+            self.source_label.setText('草稿保存失败，文字仍在输入框；请勿关闭软件。')
 
     def select_session(self, item, previous=None):
         if item is None:
@@ -515,18 +545,73 @@ class MainWindow(QMainWindow):
         self.conversation_meta.setText(f"{len(messages)} 条历史消息  ·  完整会话")
         self.risk_badge.setText(self.result["risk"]["level"] + "  待核实")
         self.chat.set_messages(messages + self.simulated_chat_messages(session))
-        self.original, edited, self.source = self.drafts.get(session, (self.result["draft"], self.result["draft"], "本地模板"))
+        saved = self.store.composer_draft(self.draft_scope(), session) or {}
+        self.draft_fingerprint = saved.get('fingerprint', json.dumps(self.result['case'], sort_keys=True))
+        self.original, edited, self.source = saved.get('original', ''), saved.get('edited', ''), saved.get('source', '人工输入')
+        self.send_token = saved.get('token', str(uuid4()))
+        self.loading_draft = True
         self.draft.setPlainText(edited)
-        self.source_label.setText(self.source + " · 审核保存后可回复客户（本地模拟）")
-        self.reply_button.setEnabled(self.store.task(session) is not None)
+        self.loading_draft = False
+        self.draft_revision += 1
+        self.source_label.setText("草稿自动保存 · 仅本地模拟发送，未接入客户渠道")
+        if saved.get('fingerprint') and saved['fingerprint'] != json.dumps(self.result['case'], sort_keys=True):
+            self.stale_drafts.add(session)
+        self.update_send_button()
         self.facts.show_result(self.result, self.provider)
+        if session in self.stale_drafts:
+            self.reply_button.setEnabled(False)
+            self.source_label.setText('资料已变化，请清空后重新输入，或重新生成建议后核对。')
+        if not hasattr(self, '_source_stamp'):
+            stat = self.provider.source.stat()
+            self._source_stamp = (stat.st_mtime_ns, stat.st_size)
+
+    def poll_source(self):
+        """Reload changed local input, but never replace a handover without a click."""
+        if not self.provider or not self.result:
+            return
+        try:
+            stat = self.provider.source.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            if stamp == getattr(self, '_source_stamp', None):
+                return
+            if not hasattr(self, '_source_stamp'):
+                self._source_stamp = stamp
+                return
+            provider = ExcelProvider(self.provider.source)
+            session = self.result['case']['session_id']
+            messages = provider.messages(session)
+            if not messages:
+                self.statusBar().showMessage('新资料中未找到当前会话；旧摘要已保留，请重新选择数据。')
+                return
+            self.provider = provider
+            self._source_stamp = stamp
+            self.chat.set_messages(messages + self.simulated_chat_messages(session))
+            pane = self.facts.handover
+            pane.provider = provider
+            pane.refresh_pending()
+            risk = assess(provider.get_case(session, messages[-1]['发送时间']))
+            self.result = run_case(provider, session, messages[-1]['发送时间'])
+            self.facts.refresh_business(self.result, provider)
+            self.stale_drafts.add(session)
+            self.reply_button.setEnabled(False)
+            self.source_label.setText('资料已变化，请清空后重新输入，或重新生成建议后核对。')
+            self.risk_badge.setText(risk['level'] + ' · 新资料待核实')
+            if risk['level'] == 'P0':
+                self.statusBar().showMessage('P0：新资料含不适或就医线索，请优先核实；无需等待摘要更新。')
+            self.conversation_meta.setText(f'{len(messages)} 条历史消息 · 已载入新资料，摘要待点击更新')
+        except (OSError, ValueError, KeyError):
+            self.statusBar().showMessage('新资料读取失败，保留旧摘要；请检查工作簿。')
 
     def reset_draft(self):
         if self.result:
-            self.original = self.result["draft"]
-            self.source = "本地模板"
-            self.draft.setPlainText(self.original)
-            self.source_label.setText("本地模板 · 审核保存后可回复客户（本地模拟）")
+            if self.draft.toPlainText() and QMessageBox.question(self, '清空草稿', '清空当前未发送的文字？') != QMessageBox.StandardButton.Yes:
+                return
+            self.original = ''
+            self.source = "人工输入"
+            self.stale_drafts.discard(self.result['case']['session_id'])
+            self.draft_fingerprint = json.dumps(self.result['case'], sort_keys=True)
+            self.draft.clear()
+            self.source_label.setText("草稿自动保存 · 仅本地模拟发送")
 
     def review(self):
         if self.result:
@@ -541,17 +626,26 @@ class MainWindow(QMainWindow):
                 for row in self.store.simulated_messages(session)]
 
     def reply_customer(self):
-        if not self.result:
+        if not self.result or not self.draft.toPlainText().strip():
             return
         session = self.result["case"]["session_id"]
-        task = self.store.task(session)
-        if not task:
-            QMessageBox.information(self, "请先审核", "请先点击“审核并保存”，再回复客户。")
+        if session in self.stale_drafts:
             return
-        content = self.store.reviewed_reply(session) or ""
-        dialog = ReplyDialog(self, session, content)
-        dialog.exec()
+        self.reply_button.setEnabled(False)
+        try:
+            self.store.send_composed(scope=self.draft_scope(), session=session, token=self.send_token,
+                original=self.original, edited=self.draft.toPlainText(), source=self.source,
+                cutoff=self.result['case']['cutoff'], risk=self.result['risk'], operator=getpass.getuser())
+        except (ValueError, sqlite3.Error, OSError):
+            self.source_label.setText('模拟发送失败，原文已保留，请重试。')
+            self.update_send_button()
+            return
+        self.original, self.source = '', '人工输入'
+        self.draft.clear()
+        self.draft_revision += 1
+        self.source_label.setText('已本地模拟发送 · 未送达外部渠道')
         self.chat.set_messages(self.provider.messages(session) + self.simulated_chat_messages(session))
+        self.refresh_board()
 
     def show_history(self):
         if not self.result:
@@ -624,7 +718,10 @@ class MainWindow(QMainWindow):
             return
         self.settings = settings
         self.provider = provider
+        stat = provider.source.stat()
+        self._source_stamp = (stat.st_mtime_ns, stat.st_size)
         self.drafts.clear()
+        self.stale_drafts.clear()
         self.populate_sessions()
         self.statusBar().showMessage("已载入业务数据：" + path)
 
@@ -636,7 +733,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(16)
         layout.addWidget(label("连接你的 AI 副驾", "pageTitle"))
-        layout.addWidget(label("模型仅选择开场措辞。API Key 只在本次运行保留。", "muted"))
+        layout.addWidget(label("用于服务摘要和回复建议。已选择的 .env 会在启动时自动读取；密钥不会复制到设置文件。点击 AI 建议会向接口发送遮蔽后的会话、参考信息及草稿。", "muted"))
         form = QFormLayout()
         base = QLineEdit(self.settings.get("base_url", ""))
         base.setPlaceholderText("https://…/v1")
@@ -646,12 +743,28 @@ class MainWindow(QMainWindow):
         for name, field in [("接口地址", base), ("模型名称", model), ("API Key", key)]:
             form.addRow(name, field)
         layout.addLayout(form)
+        env_path = self.settings.get('env_path', '')
+        def import_config():
+            nonlocal env_path
+            from dotenv import dotenv_values
+            path, _ = QFileDialog.getOpenFileName(dialog, '读取已有模型配置', '', '环境配置 (*.env);;所有文件 (*)')
+            if not path:
+                return
+            try:
+                values = dotenv_values(path, interpolate=False)
+                base.setText(values.get('LLM_BASE_URL') or '')
+                model.setText(values.get('LLM_MODEL') or '')
+                key.setText(values.get('LLM_API_KEY') or '')
+                env_path = path
+            except (OSError, ValueError):
+                QMessageBox.warning(dialog, '读取失败', '请检查配置文件格式和权限。')
+        layout.addWidget(button('选择 .env 配置（下次启动自动读取）', import_config))
         controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         controls.accepted.connect(dialog.accept)
         controls.rejected.connect(dialog.reject)
         layout.addWidget(controls)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dict(self.settings, base_url=base.text().strip(), model=model.text().strip())
+            settings = dict(self.settings, base_url=base.text().strip(), model=model.text().strip(), env_path=env_path)
             save_settings(settings, self.settings_directory)
             self.settings, self.api_key = settings, key.text()
 
@@ -664,44 +777,80 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.information(self, "请配置模型", str(exc))
             return
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("生成模型建议")
-        dialog.setText("将向配置的模型接口发送当前会话的脱敏买家文字，用于选择开场措辞。")
-        dialog.setDetailedText(json.dumps(model_context(self.result), ensure_ascii=False, indent=2))
-        dialog.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        if dialog.exec() != QMessageBox.StandardButton.Ok:
-            return
         self.model_context_session = self.result["case"]["session_id"]
+        self.model_input = json.dumps(self.result['case'], sort_keys=True)
+        self.model_draft = self.draft.toPlainText()
+        self.model_revision = self.draft_revision
+        self.model_messages = self.store.simulated_messages(self.model_context_session)
         self.model_button.setEnabled(False)
         self.open_button.setEnabled(False)
-        self.sessions.setEnabled(False)
-        self.draft.setReadOnly(True)
-        self.reset_button.setEnabled(False)
-        self.review_button.setEnabled(False)
+        self.model_button.setText('正在生成…')
         self.statusBar().showMessage("正在生成模型建议…")
-        self.worker = ModelWorker(self.result, config, self)
+        self.worker = ModelWorker(self.result, config, self, self.model_draft, self.model_messages)
         self.worker.result_ready.connect(self.model_completed)
         self.worker.finished.connect(self.model_finished)
         self.worker.start()
 
     def model_completed(self, output):
-        self.original = output["text"]
-        self.source = "模型辅助草稿" if output["status"] == "model" else "回退模板"
+        if not self.result or self.result['case']['session_id'] != self.model_context_session:
+            self.statusBar().showMessage('已切换会话，未填入旧会话的 AI 建议；可切回后重新生成。')
+            return
+        if output['status'] != 'model':
+            self.source_label.setText('生成失败，请重试；原文已保留，也可直接手写回复。')
+            return
+        if self.model_input != json.dumps(self.result['case'], sort_keys=True):
+            self.source_label.setText('生成期间资料已变化，未采用旧结果，请重新生成。')
+            return
+        if self.model_messages != self.store.simulated_messages(self.model_context_session):
+            self.source_label.setText('生成期间已有新回复发送，未采用旧建议，请重新生成。')
+            return
+        if self.model_draft or self.draft_revision != self.model_revision or self.draft.toPlainText():
+            revision = self.draft_revision
+            if not self.preview_suggestion(output['text']):
+                return
+            if revision != self.draft_revision or self.model_input != json.dumps(self.result['case'], sort_keys=True):
+                self.source_label.setText('预览期间内容已变化，原文已保留，请重新生成。')
+                return
+        self.stale_drafts.discard(self.result['case']['session_id'])
+        self.draft_fingerprint = self.model_input
+        self.original = output['text']
+        self.source = 'AI 建议'
         self.draft.setPlainText(self.original)
-        self.source_label.setText(self.source + " · " + output["notice"])
-        self.statusBar().showMessage(output["notice"])
+        self.remember_draft()
+        self.source_label.setText('AI 建议 · 可直接修改后模拟发送 · 草稿已保存')
+
+    def preview_suggestion(self, text):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('预览 AI 建议')
+        dialog.resize(620, 460)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label('原文已保留，点击“替换”才会更新回复框。', 'muted'))
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setPlainText(text)
+        layout.addWidget(preview)
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        controls.addButton('替换', QDialogButtonBox.ButtonRole.AcceptRole)
+        controls.accepted.connect(dialog.accept)
+        controls.rejected.connect(dialog.reject)
+        layout.addWidget(controls)
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
     def model_finished(self):
-        self.model_button.setEnabled(True)
+        self.model_button.setEnabled(self.provider is not None)
+        self.model_button.setText('✧  AI 建议')
         self.open_button.setEnabled(True)
-        self.sessions.setEnabled(True)
-        self.draft.setReadOnly(False)
-        self.reset_button.setEnabled(True)
-        self.review_button.setEnabled(True)
+        self.update_send_button()
 
     def closeEvent(self, event):
-        if self.worker and self.worker.isRunning():
+        if (self.worker and self.worker.isRunning()) or (self.summary_worker and self.summary_worker.isRunning()):
             self.statusBar().showMessage("模型请求仍在进行，请等待返回后关闭。")
+            event.ignore()
+            return
+        try:
+            self.remember_draft()
+        except (OSError, sqlite3.Error):
+            self.source_label.setText('草稿保存失败，请复制回复文字后重试关闭。')
             event.ignore()
             return
         event.accept()

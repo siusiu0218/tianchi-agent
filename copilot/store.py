@@ -43,12 +43,59 @@ class ReviewStore:
                     session TEXT NOT NULL, review_id INTEGER NOT NULL,
                     created TEXT NOT NULL, operator TEXT NOT NULL,
                     content TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS composer_drafts (
+                    scope TEXT NOT NULL, session TEXT NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY(scope, session));
             """)
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         return db
+
+    def composer_draft(self, scope, session):
+        with closing(self.connect()) as db:
+            row = db.execute('SELECT payload FROM composer_drafts WHERE scope=? AND session=?',
+                             (scope, session)).fetchone()
+            return json.loads(row['payload']) if row else None
+
+    def save_composer_draft(self, scope, session, payload):
+        with closing(self.connect()) as db, db:
+            if payload['edited']:
+                db.execute('INSERT OR REPLACE INTO composer_drafts VALUES(?,?,?)',
+                           (scope, session, json.dumps(payload, ensure_ascii=False)))
+            else:
+                db.execute('DELETE FROM composer_drafts WHERE scope=? AND session=?', (scope, session))
+
+    def send_composed(self, *, scope, session, token, original, edited, source, cutoff, risk, operator):
+        """One explicit send click atomically records review, message and draft removal."""
+        if not edited.strip() or not operator.strip():
+            raise ValueError('回复内容和操作人不能为空。')
+        now = datetime.now(timezone.utc).isoformat()
+        payload = dict(cutoff=cutoff, original=original, edited=edited, source=source, risk=risk,
+                       decision='采纳' if original == edited else '修改后确认',
+                       operator=operator, owner=operator, reason='客服点击模拟发送，确认框内最终内容')
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute('SELECT id FROM simulated_messages WHERE token=?', (token,)).fetchone()
+            if existing:
+                return existing['id'], False
+            review_id = db.execute('INSERT INTO reviews(token,session,created,payload) VALUES(?,?,?,?)',
+                                  (token, session, now, json.dumps(payload, ensure_ascii=False))).lastrowid
+            before = db.execute('SELECT * FROM tasks WHERE session=?', (session,)).fetchone()
+            if not before:
+                db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)',
+                           (session, review_id, operator, '待处理', now, now))
+            elif before['status'] not in {'已解决', '已关闭'}:
+                db.execute('UPDATE tasks SET review_id=?,updated=? WHERE session=?', (review_id, now, session))
+            after = dict(db.execute('SELECT * FROM tasks WHERE session=?', (session,)).fetchone())
+            self._event(db, session, now, operator, '本地模拟回复，未送达外部渠道',
+                        dict(before) if before else {}, after)
+            message_id = db.execute('''INSERT INTO simulated_messages
+                (token,session,review_id,created,operator,content) VALUES(?,?,?,?,?,?)''',
+                (token, session, review_id, now, operator, edited)).lastrowid
+            db.execute('DELETE FROM composer_drafts WHERE scope=? AND session=?', (scope, session))
+            return message_id, True
 
     def save(self, *, session, cutoff, original, edited, source, risk,
              decision, operator, owner, reason, confirmed):

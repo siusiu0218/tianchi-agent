@@ -1,8 +1,54 @@
 # 共情副驾：美妆客服 AI 智能助手
 
-> 2026-09-17 新增 Windows 原生桌面版：安装包位于 `release/desktop/EmpathyCopilot-Setup.exe`，便携程序位于 `release/desktop/EmpathyCopilot/EmpathyCopilot.exe`。首次打开点击“选择 Excel”载入业务文件；无需浏览器或单独安装 Python。源码入口为 `python -m desktop`，依赖见 `requirements-desktop.txt`。桌面版审核记录保存在 `%LOCALAPPDATA%\EmpathyCopilot`，不自动导入网页版记录。完整本地操作说明见 `DESKTOP_GUIDE.md`。
+项目当前进度见 [WORKFLOW.md](WORKFLOW.md)，其他使用、数据和协作资料见 [项目文档导航](docs/README.md)。
 
-> 2026-09-16 当前可运行版本：v0.1。本地审核、任务看板和两个场景已实现。启动及验收请先看 [运行与演示指南](RELEASE_GUIDE.md)；以下内容包含早期产品规划，未全部实现。模型目前仅选择开场语，未实现自由生成或真实业务执行。
+## 快速开始：Windows 桌面版（协同开发入口）
+
+当前协同开发使用 **PySide6 原生桌面版**，界面源码在 `desktop/`，启动入口是 `python -m desktop`。仓库同时保留 Streamlit 网页版 `app.py`；运行 `streamlit run app.py` 打开的是网页版，不会显示桌面界面的修改。
+
+### 桌面版 0.5.0 回复流程
+
+- 首次打开会话时回复框为空，可手写或点击“AI 建议”。AI 根据会话及已有草稿生成正文，仍需客服核对。
+- 空框直接填入建议；已有文字或生成期间发生编辑时，先预览，点击“替换”才更新。生成失败保留原文，不回填模板。
+- 点击“模拟发送”即记录框内最终内容，不再单独审核或弹窗；成功清空输入框，失败保留。当前没有真实外发渠道。
+- 草稿按工作簿路径和会话分别自动保存在本机，切换会话、重启后恢复。原始建议、最终回复和本机 Windows 操作人写入本地操作记录。
+- AI 使用设置中的模型接口；点击生成会发送经过数字、邮箱遮蔽的会话、程序参考信息及已有草稿。遮蔽不等于完整匿名化；密钥仍仅在运行期间保留。
+
+### 第一次从源码启动
+
+先安装 Python（本项目使用过 Python 3.11 环境），然后在本机克隆下来的项目文件夹中打开 PowerShell。该文件夹应能看到 `README.md` 和 `requirements-desktop.txt`。逐行执行：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-desktop.txt
+.\.venv\Scripts\python.exe -m desktop
+```
+
+第一行创建项目专用 Python 环境，第二行安装桌面版依赖，第三行打开桌面窗口。已有 `.venv` 时可跳过第一行；这些命令直接使用环境中的 Python，无需执行激活脚本。
+
+首次打开后点击“选择 Excel”，载入团队提供的业务工作簿。原始比赛 Excel 不随 Git 分发，需要通过团队授权渠道另行取得。桌面版审核记录保存在 `%LOCALAPPDATA%\EmpathyCopilot`，不自动导入网页版记录。
+
+### 日常协同开发
+
+先保存工作并关闭正在运行的桌面窗口；有未提交修改时，先按团队协作方式处理，再拉取更新。在项目文件夹中执行：
+
+```powershell
+git pull
+.\.venv\Scripts\python.exe -m pip install -r requirements-desktop.txt
+.\.venv\Scripts\python.exe -m desktop
+```
+
+依赖未变化时可跳过安装依赖这一步。修改 `desktop/` 中的界面代码后，关闭并重新运行上述桌面入口即可查看效果，无需每次制作安装包。`copilot/` 是桌面版与网页版共用的业务模块。
+
+### 源码与安装包的区别
+
+`git pull` 更新的是源码，不会自动生成或下载 exe。仅体验软件的成员可以使用另行分发的安装包，无需单独安装 Python。
+
+本地打包输出为 `release/desktop/EmpathyCopilot-Setup.exe`；便携版主程序为 `release/desktop/EmpathyCopilot/EmpathyCopilot.exe`，使用便携版时需保留整个 `EmpathyCopilot` 文件夹（包括 `_internal`）。`release/desktop/` 已被 Git 忽略，这些是本地构建路径，不是克隆仓库后自带的文件。
+
+## 历史版本与产品规划
+
+> 2026-09-16 网页原型 v0.1：本地审核、任务看板和两个场景已实现。以下内容包含早期产品规划，未全部实现，不作为当前桌面版启动说明。模型目前仅选择开场语，未实现自由生成或真实业务执行。
 
 > 欧莱雅第二届美妆科技黑客松——赛题 1「数据共情者：消费者的 AI 管家」参赛项目指导文件
 

@@ -297,54 +297,34 @@ class EvidencePanel(QScrollArea):
 
     def show_result(self, result, provider):
         clear_layout(self.flow)
-        case, risk = result["case"], result["risk"]
-        summary = QFrame()
-        summary.setObjectName("summaryCard")
-        summary_layout = QVBoxLayout(summary)
-        summary_layout.setContentsMargins(12, 12, 12, 12)
-        summary_layout.setSpacing(7)
-        summary_layout.addWidget(text("会话速览", "heading"))
-        summary_layout.addWidget(text("关键消息摘录 · 按当前会话更新", "muted"))
-        buyers = [m for m in case["messages"] if m["角色"] == "买家"]
-        agents = [m for m in case["messages"] if m["角色"] == "客服"]
-        excerpts = [("客户最初反馈", buyers[0] if buyers else None),
-                    ("客服最新处理", agents[-1] if agents else None)]
-        if len(buyers) > 1:
-            excerpts.append(("客户最新回应", buyers[-1]))
-        for title, message in excerpts:
-            summary_layout.addWidget(text(title, "section"))
-            value = message["message_text"].strip() if message else "暂无文字记录"
-            excerpt = text(value[:150] + ("…" if len(value) > 150 else ""), selectable=True)
-            if message:
-                excerpt.setToolTip(value + "\n消息 " + message["message_id"])
-            summary_layout.addWidget(excerpt)
-        summary_layout.addWidget(text("待跟进", "section"))
-        summary_layout.addWidget(text("核实聊天中承诺的处理是否落实；客服表述不代表实际完成。"))
-        self.flow.addWidget(summary)
-        p0 = risk["level"] == "P0"
-        badge = QFrame()
-        badge.setObjectName("riskCard" if p0 else "serviceCard")
-        box = QVBoxLayout(badge)
-        box.setContentsMargins(14, 13, 14, 13)
-        box.setSpacing(8)
-        box.addWidget(text(risk["level"] + ("  优先核实" if p0 else "  人工跟进"), "riskTitle" if p0 else "serviceTitle"))
-        box.addWidget(text(risk["reason"]))
-        box.addWidget(text("处理优先级提示，不代表医学诊断", "muted"))
-        self.flow.addWidget(badge)
-        self.flow.addWidget(text(f"原文证据  ·  {len(risk['evidence'])}", "section"))
-        if not risk["evidence"]:
-            self.flow.addWidget(text("暂无规则命中，仍需人工核实。", "muted"))
-        for evidence in risk["evidence"]:
-            quote = QFrame()
-            quote.setObjectName("quote")
-            layout = QVBoxLayout(quote)
-            layout.setContentsMargins(12, 10, 10, 10)
-            layout.addWidget(text(evidence["quote"], selectable=True))
-            identifier = text("消息 " + evidence["message_id"], "muted", True)
-            identifier.setToolTip(evidence["message_id"])
-            layout.addWidget(identifier)
-            self.flow.addWidget(quote)
-        self.add_records("关联订单", case["orders"])
+        case = result["case"]
+        if getattr(self, "state_path", None):
+            from desktop.handover import HandoverPane
+            self.handover = HandoverPane(provider, self.state_path, case["session_id"], self.canvas)
+            self.flow.addWidget(self.handover)
+        primary_flow = self.flow
+        business = QWidget(self.canvas)
+        self.business_flow = QVBoxLayout(business)
+        self.business_flow.setContentsMargins(0, 0, 0, 0)
+        self.business_flow.setSpacing(4)
+        toggle = QPushButton('▸  订单、工单与物流', self.canvas)
+        toggle.setObjectName('fold')
+        toggle.setCheckable(True)
+        toggle.toggled.connect(business.setVisible)
+        toggle.toggled.connect(lambda yes: toggle.setText(('▾  ' if yes else '▸  ') + '订单、工单与物流'))
+        primary_flow.addWidget(toggle)
+        primary_flow.addWidget(business)
+        business.hide()
+        self.refresh_business(result, provider)
+        self.verticalScrollBar().setValue(0)
+
+    def refresh_business(self, result, provider):
+        """Refresh live snapshots without replacing the summary being reviewed."""
+        primary_flow = self.flow
+        self.flow = self.business_flow
+        clear_layout(self.flow)
+        case = result['case']
+        self.add_records("关联订单", case["orders"], folded=True)
         self.add_records(f"已创建工单  ·  {len(case['tickets'])}", case["tickets"], folded=True)
         if result["service"]:
             self.add_records("物流与换货", [{"建议下一步": result["service"]["next_step"],
@@ -354,7 +334,7 @@ class EvidencePanel(QScrollArea):
             self.add_records("补发物流快照", shipping["replacement"], folded=True)
         self.add_records("完整工单快照 · 仅供核对", provider.ticket_snapshot(case["session_id"]), folded=True)
         self.flow.addWidget(text("快照仅供核对；物流单号不代表已经发货。", "muted"))
-        self.verticalScrollBar().setValue(0)
+        self.flow = primary_flow
 
 
 class MetricCard(QFrame):

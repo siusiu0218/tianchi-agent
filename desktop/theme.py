@@ -13,6 +13,10 @@ QLabel#heading { font-size: 17px; font-weight: 600; color: #202e43; }
 QLabel#pageTitle { font-size: 22px; font-weight: 700; }
 QLabel#muted { color: #8190a5; font-size: 11px; }
 QLabel#section { color: #7e8da4; font-size: 11px; font-weight: 600; }
+QLabel#summaryHeading { color: #65748a; font-size: 12px; font-weight: 600; margin-top: 5px; }
+QLabel#summaryBody { color: #243247; font-size: 13px; }
+QLabel#summaryRisk { color: #bc4860; font-size: 11px; font-weight: 600; }
+QPushButton#summaryAction { font-size: 11px; padding: 5px 10px; }
 QLabel#error { color: #bc4860; }
 QLabel#pill { color: #5572bd; background: #eff3ff; border-radius: 9px; padding: 4px 9px; font-size: 11px; }
 QLabel#avatar { color: #567298; background: #e8eff9; border-radius: 12px; font-weight: 600; }

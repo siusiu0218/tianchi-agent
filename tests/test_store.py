@@ -1,4 +1,6 @@
 import os
+import sqlite3
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
@@ -27,6 +29,30 @@ class ReviewTests(unittest.TestCase):
         self.store.save(**{**self.args, "decision": "驳回", "owner": ""})
         self.assertIsNone(self.store.task("S00268"))
         self.assertEqual(len(self.store.history("S00268")), 1)
+
+    def test_composed_send_is_atomic_and_retry_is_idempotent(self):
+        draft = {'edited': '最终回复'}
+        self.store.save_composer_draft('book-a', 'S00268', draft)
+        self.store.save_composer_draft('book-b', 'S00268', {'edited': '另一本工作簿草稿'})
+        args = dict(scope='book-a', session='S00268', token='send-1', original='AI 原稿',
+                    edited='最终回复', source='AI 建议', cutoff='2026-05-15',
+                    risk={'level': 'P0'}, operator='客服')
+        with closing(self.store.connect()) as db, db:
+            db.execute("CREATE TRIGGER fail_send BEFORE INSERT ON simulated_messages BEGIN SELECT RAISE(ABORT, 'test'); END")
+        with self.assertRaises(sqlite3.Error):
+            self.store.send_composed(**args)
+        self.assertEqual(self.store.history('S00268'), [])
+        self.assertIsNone(self.store.task('S00268'))
+        self.assertEqual(self.store.composer_draft('book-a', 'S00268'), draft)
+        with closing(self.store.connect()) as db, db:
+            db.execute('DROP TRIGGER fail_send')
+        first = self.store.send_composed(**args)
+        second = self.store.send_composed(**args)
+        self.assertTrue(first[1])
+        self.assertEqual(second, (first[0], False))
+        self.assertEqual(len(self.store.history('S00268')), 1)
+        self.assertIsNone(self.store.composer_draft('book-a', 'S00268'))
+        self.assertIsNotNone(self.store.composer_draft('book-b', 'S00268'))
 
     def test_concurrent_duplicate_and_reopen(self):
         with ThreadPoolExecutor(max_workers=4) as pool:

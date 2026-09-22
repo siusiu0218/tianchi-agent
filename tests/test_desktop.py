@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import Qt, QObject, QEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QWidget, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QWidget, QPushButton, QLabel
 
 from copilot.data import DEFAULT_SOURCE, ExcelProvider
 from copilot.store import ReviewStore
@@ -49,6 +49,8 @@ class DesktopTests(unittest.TestCase):
 
     def review_dialog(self):
         w = self.window
+        if not w.draft.toPlainText():
+            w.draft.setPlainText('测试回复')
         return ReviewDialog(w, w.result, w.original, w.draft.toPlainText(), w.source)
 
     def fill_review(self, dialog):
@@ -74,6 +76,19 @@ class DesktopTests(unittest.TestCase):
         visible = [self.window.sessions.item(i) for i in range(self.window.sessions.count())
                    if not self.window.sessions.item(i).isHidden()]
         self.assertEqual(len(visible), 1)
+
+    def test_business_snapshots_refresh_without_replacing_summary(self):
+        self.select('S00268')
+        pane = self.window.facts.handover
+        before = pane.raw
+        snapshot = [{'工单类别': '测试快照', '工单号': 'synthetic', '任务状态': '新快照状态'}]
+        with patch.object(self.provider, 'ticket_snapshot', return_value=snapshot):
+            self.window.facts.refresh_business(self.window.result, self.provider)
+        self.app.processEvents()
+        texts = [w.text() for w in self.window.facts.findChildren(QLabel)]
+        self.assertIn('新快照状态', texts)
+        self.assertIs(self.window.facts.handover, pane)
+        self.assertEqual(pane.raw, before)
 
     def test_review_restart_task_transitions_and_stale_rejection(self):
         dialog = self.review_dialog()
@@ -155,25 +170,103 @@ class DesktopTests(unittest.TestCase):
     def test_background_model_fallback_and_empty_startup(self):
         self.window.settings.update(base_url="http://localhost:9000/v1", model="test")
         output = {"text": self.window.result["draft"], "status": "fallback", "notice": "测试回退"}
-        with patch("desktop.window.generate_draft", return_value=output), patch.object(
+        with patch("desktop.window.generate_reply", return_value=output), patch.object(
                 QMessageBox, "exec", return_value=QMessageBox.StandardButton.Ok):
             self.window.generate_model()
-            self.assertFalse(self.window.sessions.isEnabled())
+            self.assertTrue(self.window.sessions.isEnabled())
             self.window.worker.wait(3000)
             for _ in range(5):
                 self.app.processEvents()
                 QTest.qWait(10)
-        self.assertEqual(self.window.source, "回退模板")
+        self.assertEqual(self.window.draft.toPlainText(), '')
+        self.assertIn('生成失败', self.window.source_label.text())
         self.assertTrue(self.window.sessions.isEnabled())
         empty = MainWindow(None, self.store, settings_directory=self.root)
         self.assertEqual(empty.sessions.count(), 0)
-        self.assertFalse(empty.review_button.isEnabled())
+        self.assertFalse(empty.reply_button.isEnabled())
         empty.close()
 
     def test_settings_do_not_persist_key(self):
         save_settings({"data_path": str(DEFAULT_SOURCE), "api_key": "never-save-this"}, self.root)
         self.assertNotIn("never-save-this", (self.root / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual(read_settings(self.root)["data_path"], str(DEFAULT_SOURCE))
+
+    def test_composer_empty_restart_and_session_isolation(self):
+        self.assertEqual(self.window.draft.toPlainText(), '')
+        self.window.draft.setPlainText('客户 A 的未发送草稿')
+        self.select('S00001')
+        self.assertEqual(self.window.draft.toPlainText(), '')
+        self.window.draft.setPlainText('客户 B 的未发送草稿')
+        reopened = MainWindow(self.provider, ReviewStore(self.store.path), settings_directory=self.root)
+        self.assertEqual(reopened.draft.toPlainText(), '客户 A 的未发送草稿')
+        reopened.close()
+        self.select('S00268')
+        self.assertEqual(self.window.draft.toPlainText(), '客户 A 的未发送草稿')
+
+    def test_send_click_audits_final_text_and_clears_only_on_success(self):
+        for session in ('S00268', 'S00001'):
+            self.select(session)
+            self.window.original = 'AI 原稿'
+            self.window.source = 'AI 建议'
+            self.window.draft.setPlainText('客服修改后的正文')
+            with patch.object(self.store, 'send_composed', side_effect=OSError):
+                self.window.reply_button.click()
+            self.assertEqual(self.window.draft.toPlainText(), '客服修改后的正文')
+            self.window.reply_button.click()
+            self.window.reply_button.click()
+            self.assertEqual(self.window.draft.toPlainText(), '')
+            self.assertEqual(len(self.store.simulated_messages(session)), 1)
+            self.assertEqual(self.store.history(session)[0]['original'], 'AI 原稿')
+            self.assertEqual(self.store.history(session)[0]['edited'], '客服修改后的正文')
+            self.assertIn('客服修改后的正文', self.window.chat.toPlainText())
+            self.assertIsNone(self.store.composer_draft(self.window.draft_scope(), session))
+
+    def prepare_model_result(self):
+        w = self.window
+        w.model_context_session = w.result['case']['session_id']
+        w.model_input = json.dumps(w.result['case'], sort_keys=True)
+        w.model_revision = w.draft_revision
+        w.model_draft = w.draft.toPlainText()
+        w.model_messages = self.store.simulated_messages(w.model_context_session)
+        return {'status': 'model', 'text': '新的 AI 回复', 'notice': '建议'}
+
+    def test_ai_empty_fill_preview_cancel_and_accept(self):
+        output = self.prepare_model_result()
+        with patch.object(self.window, 'preview_suggestion') as preview:
+            self.window.model_completed(output)
+            preview.assert_not_called()
+        self.assertEqual(self.window.draft.toPlainText(), output['text'])
+        self.window.draft.setPlainText('客服已有文字')
+        output = self.prepare_model_result()
+        with patch.object(self.window, 'preview_suggestion', return_value=False):
+            self.window.model_completed(output)
+        self.assertEqual(self.window.draft.toPlainText(), '客服已有文字')
+        with patch.object(self.window, 'preview_suggestion', return_value=True):
+            self.window.model_completed(output)
+        self.assertEqual(self.window.draft.toPlainText(), output['text'])
+
+    def test_late_ai_never_overwrites_typing_other_session_or_sent_reply(self):
+        output = self.prepare_model_result()
+        self.window.draft.setPlainText('生成期间新输入')
+        with patch.object(self.window, 'preview_suggestion', return_value=False) as preview:
+            self.window.model_completed(output)
+            preview.assert_called_once()
+        self.assertEqual(self.window.draft.toPlainText(), '生成期间新输入')
+        self.select('S00001')
+        self.window.model_completed(output)
+        self.assertEqual(self.window.draft.toPlainText(), '')
+        self.select('S00268')
+        output = self.prepare_model_result()
+        self.window.reply_customer()
+        self.window.model_completed(output)
+        self.assertEqual(self.window.draft.toPlainText(), '')
+
+    def test_failed_generation_keeps_existing_draft(self):
+        self.window.draft.setPlainText('保留这段话')
+        self.prepare_model_result()
+        self.window.model_completed({'status': 'error', 'text': ''})
+        self.assertEqual(self.window.draft.toPlainText(), '保留这段话')
+        self.assertTrue(self.window.reply_button.isEnabled())
 
     def test_session_clicks_never_show_detached_windows(self):
         class WindowWatcher(QObject):

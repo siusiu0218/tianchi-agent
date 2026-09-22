@@ -9,6 +9,7 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_GUIDE = ROOT / "docs" / "guides" / "release-v0.1.md"
 
 
 def main():
@@ -16,7 +17,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    paths = [ROOT / n for n in ("app.py", "run.ps1", "requirements.txt", "requirements-lock.txt", "RELEASE_GUIDE.md")]
+    paths = [ROOT / n for n in ("app.py", "run.ps1", "requirements.txt", "requirements-lock.txt")]
+    paths.append(RELEASE_GUIDE)
     paths.append(ROOT / ".streamlit" / "config.toml")
     paths += sorted((ROOT / "copilot").glob("*.py"))
     paths += sorted((ROOT / "tests").glob("*.py"))
@@ -29,7 +31,7 @@ def main():
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for p in paths:
             archive.write(p, p.relative_to(ROOT).as_posix())
-        archive.writestr("README.md", (ROOT / "RELEASE_GUIDE.md").read_text(encoding="utf-8"))
+        archive.writestr("README.md", RELEASE_GUIDE.read_text(encoding="utf-8"))
         archive.writestr("release-manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         archive.write(ROOT / "artifacts" / "evaluation.json", "evaluation.json")
     with zipfile.ZipFile(zip_path) as archive:
@@ -40,7 +42,7 @@ def main():
     manifest["zip_sha256"] = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     (args.output / "release-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (args.output / "evaluation.json").write_bytes((ROOT / "artifacts" / "evaluation.json").read_bytes())
-    (args.output / "运行与演示指南.md").write_bytes((ROOT / "RELEASE_GUIDE.md").read_bytes())
+    (args.output / "运行与演示指南.md").write_bytes(RELEASE_GUIDE.read_bytes())
     print(json.dumps({"zip": str(zip_path), "files": len(paths), "sha256": manifest["zip_sha256"]}, ensure_ascii=False))
 
 
