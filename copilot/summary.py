@@ -6,6 +6,7 @@ import re
 from copilot.agent import positive_mention
 
 FIELDS = ("经过概述", "诉求", "待解决", "建议")
+LOCAL_SOURCE = "本地自动整理 · 待人工核对"
 # These are routing aids, not an exhaustive intent classifier.
 TOPICS = {
     "使用不适": ("过敏", "红肿", "刺痛", "不良反应", "医院", "就医", "起疹", "瘙痒"),
@@ -155,6 +156,11 @@ def build_summary(cases, snapshots=None, selections=None):
     # Only explicitly mentioned topics enter the summary; no silent classification.
     active = [name for name in TOPICS if name in detected] or ["其他事项"]
     buyer_topics = set().union(*(m['_topics'] for m in messages if m['角色'] == '买家'))
+    # A service promise about warehouse receipt or a goodwill coupon is part of
+    # the main resolution, not a separate buyer request for tracking, product
+    # advice or a discount. Keep these topics only when the buyer raised them.
+    active = [t for t in active if t not in ('物流进度', '商品咨询', '价格与优惠')
+              or t in buyer_topics]
     if '商品与换货' in active:
         if '物流进度' not in buyer_topics:
             active = [t for t in active if t != '物流进度']
@@ -202,11 +208,32 @@ def build_summary(cases, snapshots=None, selections=None):
             add("诉求", topic, f"{topic}：消费者表述“{wording}”（按原文核实具体诉求）。", [m["ref"] for m in b])
         else:
             add("诉求", topic, f"{topic}：由客服处理记录提及；消费者是否提出或接受该项安排，需结合上下文核实。", refs)
+        if topic == '商品与换货':
+            # An acknowledgement belongs to the immediately preceding proposal,
+            # never to a different session or to an earlier, superseded choice.
+            for index, message in enumerate(messages):
+                if not index or message['角色'] != '买家':
+                    continue
+                previous = messages[index - 1]
+                if (previous['session'] == message['session'] == cases[0]['session_id']
+                        and previous['角色'] == '客服'
+                        and re.search('换货|补发', previous['message_text'])
+                        and not re.search('退款|或者|两个方案', previous['message_text'])
+                        and re.fullmatch(r'(行|好|好的|可以|同意|那行)[，,。！!\s]*(那)?(尽快|麻烦|谢谢|辛苦)?[哈呀吧了。！!\s]*', message['message_text'].strip())
+                        and not any(m['角色'] == '买家' and topics(m['message_text'])
+                                    for m in messages[index + 1:])):
+                    add('诉求', '换货方案回应', '客服提出换货安排后，消费者回应“' + message['message_text'] + '”；后续按该安排核实进展。',
+                        [previous['ref'], message['ref']])
         commitments = concise(a, topic)
         if topic == '商品与换货':
+            # Keep the handover focused on substantive arrangements. Photo
+            # requests remain in the timeline and the separate image limitation.
+            commitments = [s for s in commitments if not re.search('麻烦拍|请拍|发张照片', s)]
             for m in a:
                 commitments.extend(s for s in clauses(m['message_text']) if ('发出' in s or '运费' in s) and s not in commitments)
         if commitments:
+            if topic == '商品与换货' and len(active) == 1:
+                items[:] = [i for i in items if not (i['field'] == '经过概述' and i['topic'] == '起因')]
             add("经过概述", topic, f"{topic} · 客服曾说明：“{'；'.join(commitments)}”。这是沟通记录，不等同于执行凭证。", [m["ref"] for m in a])
 
         # Completion is deliberately claim-scoped; quoted receipt is not verified payment.
@@ -223,7 +250,11 @@ def build_summary(cases, snapshots=None, selections=None):
                 completion_refs.append(confirmed[-1]['_money_receipt'])
             add("经过概述", topic + ':结果', f"{topic}：消费者报告结果“{confirmed[-1]['message_text']}”；这是消费者确认，不代表其他事项也已解决。", completion_refs)
         else:
-            add("待解决", topic, f"{topic}：尚未从所列证据确认该项完成，具体结果待核实。", refs)
+            pending_text = ("换货进度待核实：是否实际发出、消费者是否收到且商品完好；客服承诺不等于发货或收货凭证。"
+                            if topic == '商品与换货' else f"{topic}：尚未从所列证据确认该项完成，具体结果待核实。")
+            if topic == '商品与换货' and any(re.search('寄回|退回', m['message_text']) for m in a):
+                pending_text += '另需核对已提及的旧商品寄回安排是否落实。'
+            add("待解决", topic, pending_text, refs)
         if confirmed:
             add('建议', topic, '保留消费者对该项结果的确认记录；如无其他未解决诉求，再由人工核实是否结束跟进。', completion_refs)
             items[-1]['short_action'] = '保留消费者确认记录，核实其他事项后再结束跟进。'
@@ -252,7 +283,7 @@ def build_summary(cases, snapshots=None, selections=None):
     return {"items": items, "evidence": evidence, "topics": active,
             "timeline": [{"ref": m["ref"], **evidence[m["ref"]]} for m in messages],
             "coverage": {c["session_id"]: c["cutoff"] for c in cases},
-            "fingerprint": digest([4, cases, snapshots, selections]), "version": 4}
+            "fingerprint": digest([6, cases, snapshots, selections]), "version": 6}
 
 
 def order_ids(provider, session):

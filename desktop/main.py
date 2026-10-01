@@ -1,16 +1,17 @@
 import argparse
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QIcon
 
 from copilot.data import DEFAULT_SOURCE, ExcelProvider
 from copilot.store import ReviewStore
 from desktop.config import read_settings, user_directory, load_model_settings
 from desktop.window import MainWindow
+from desktop.icons import svg_icon
 
 
 def main():
@@ -20,15 +21,18 @@ def main():
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--screenshot")
     parser.add_argument("--session", help="打开指定会话")
+    parser.add_argument("--reporting-check", help="隔离数据库中运行上报验收，输出截图目录")
+    parser.add_argument("--summary-rejection-check", help="隔离数据库中验证失败摘要提示，输出截图目录")
     args = parser.parse_args()
+    check_temp = tempfile.TemporaryDirectory() if args.reporting_check or args.summary_rejection_check else None
+    if check_temp:
+        args.state = str(Path(check_temp.name) / "check.sqlite3")
+        args.smoke_test = True
     app = QApplication(sys.argv[:1])
     app.setApplicationName("EmpathyCopilot")
     app.setOrganizationName("EmpathyCopilot")
     app.setStyle("Fusion")
-    assets = (Path(sys._MEIPASS) / "desktop-assets" if getattr(sys, "frozen", False)
-              else Path(__file__).resolve().parents[1] / ".scratch" / "desktop-assets")
-    if (assets / "icon.png").exists():
-        app.setWindowIcon(QIcon(str(assets / "icon.png")))
+    app.setWindowIcon(svg_icon("messages-square", "#ffffff", brand=True))
     settings, api_key = load_model_settings(read_settings())
     source = args.data or settings.get("data_path") or os.getenv("COPILOT_DATA_PATH")
     if not source and not getattr(sys, "frozen", False) and DEFAULT_SOURCE.exists():
@@ -68,6 +72,28 @@ def main():
     window.show()
     if args.smoke_test or args.screenshot:
         def capture():
+            if args.reporting_check:
+                try:
+                    from desktop.reporting_check import check
+                    check(window, args.reporting_check)
+                except Exception:
+                    import traceback
+                    destination = Path(args.reporting_check)
+                    destination.mkdir(parents=True, exist_ok=True)
+                    (destination / 'error.txt').write_text(traceback.format_exc(), encoding='utf-8')
+                    app.exit(1)
+                    return
+            if args.summary_rejection_check:
+                try:
+                    from desktop.summary_rejection_check import check
+                    check(window, args.summary_rejection_check)
+                except Exception:
+                    import traceback
+                    destination = Path(args.summary_rejection_check)
+                    destination.mkdir(parents=True, exist_ok=True)
+                    (destination / 'error.txt').write_text(traceback.format_exc(), encoding='utf-8')
+                    app.exit(1)
+                    return
             if args.screenshot:
                 window.grab().save(args.screenshot)
             if args.smoke_test:

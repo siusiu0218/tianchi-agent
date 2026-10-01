@@ -82,15 +82,6 @@ class ReviewStore:
                 return existing['id'], False
             review_id = db.execute('INSERT INTO reviews(token,session,created,payload) VALUES(?,?,?,?)',
                                   (token, session, now, json.dumps(payload, ensure_ascii=False))).lastrowid
-            before = db.execute('SELECT * FROM tasks WHERE session=?', (session,)).fetchone()
-            if not before:
-                db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)',
-                           (session, review_id, operator, '待处理', now, now))
-            elif before['status'] not in {'已解决', '已关闭'}:
-                db.execute('UPDATE tasks SET review_id=?,updated=? WHERE session=?', (review_id, now, session))
-            after = dict(db.execute('SELECT * FROM tasks WHERE session=?', (session,)).fetchone())
-            self._event(db, session, now, operator, '本地模拟回复，未送达外部渠道',
-                        dict(before) if before else {}, after)
             message_id = db.execute('''INSERT INTO simulated_messages
                 (token,session,review_id,created,operator,content) VALUES(?,?,?,?,?,?)''',
                 (token, session, review_id, now, operator, edited)).lastrowid

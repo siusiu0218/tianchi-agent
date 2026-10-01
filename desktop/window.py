@@ -5,21 +5,29 @@ import getpass
 from uuid import uuid4
 from html import escape
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
+from PySide6.QtGui import QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPushButton, QSpinBox, QSplitter, QFrame,
-    QTabWidget, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
+    QTabWidget, QTextBrowser, QTextEdit, QVBoxLayout, QWidget, QToolButton,
 )
 
 from copilot.agent import run_case, assess
 from copilot.data import ExcelProvider
 from copilot.llm import ModelConfig
 from copilot.reply_llm import generate_reply
+from copilot.summary import digest
 from copilot.store import TRANSITIONS, overdue
+from copilot.reports import ReportStore
+from desktop.reporting import ReportDialog, HandleReportDialog, AllChatsDialog
 from desktop.config import save_settings
-from desktop.theme import STYLE
+from desktop.theme import STYLE, scaled_style
+from desktop.controls import SoftComboBox as QComboBox
+from desktop.controls import SoftMenu as QMenu
+from desktop.navigation import InboxSplitter, MessageMap, SlidingPanel, SessionItem
+from desktop.icons import svg_icon
 from desktop.widgets import ChatFeed, EvidencePanel, MetricCard, SessionDelegate, TaskDelegate, navigation_button
 
 
@@ -76,14 +84,15 @@ def risk_html(risk):
 class ModelWorker(QThread):
     result_ready = Signal(object)
 
-    def __init__(self, result, config, parent=None, draft='', local_messages=()):
+    def __init__(self, result, config, parent=None, draft='', local_messages=(), summary=None):
         super().__init__(parent)
         self.result = result
         self.config = config
         self.draft, self.local_messages = draft, local_messages
+        self.summary = summary
 
     def run(self):
-        self.result_ready.emit(generate_reply(self.result, self.config, self.draft, self.local_messages))
+        self.result_ready.emit(generate_reply(self.result, self.config, self.draft, self.local_messages, self.summary))
 
 
 class ReviewDialog(QDialog):
@@ -245,6 +254,7 @@ class MainWindow(QMainWindow):
     def __init__(self, provider, store, settings=None, settings_directory=None, api_key=""):
         super().__init__()
         self.provider, self.store = provider, store
+        self.reports = ReportStore(store)
         self.settings = dict(settings or {})
         self.settings_directory = settings_directory
         self.api_key = api_key
@@ -257,6 +267,8 @@ class MainWindow(QMainWindow):
         self.draft_revision = 0
         self.send_token = str(uuid4())
         self.setWindowTitle("共情副驾 · 桌面工作台")
+        self.brand_icon = svg_icon("messages-square", "#ffffff", brand=True)
+        self.setWindowIcon(self.brand_icon)
         self.resize(1440, 900)
         self.setMinimumSize(1120, 740)
         self.setStyleSheet(STYLE)
@@ -266,57 +278,70 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
         self.setCentralWidget(root)
         rail, rail_layout = panel("rail")
-        rail.setFixedWidth(78)
-        rail_layout.setContentsMargins(10, 22, 10, 16)
-        rail_layout.setSpacing(18)
-        brand = label("共", "railBrand")
+        self.rail = rail
+        rail.setFixedWidth(48)
+        rail_layout.setContentsMargins(4, 14, 4, 12)
+        rail_layout.setSpacing(12)
+        brand = label("", "brandMark")
+        self.brand_mark = brand
+        brand.setPixmap(self.brand_icon.pixmap(256, 256))
+        brand.setScaledContents(True)
+        brand.setAccessibleName("共情副驾")
+        brand.setToolTip("共情副驾 · 0.6.4")
         brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand.setFixedSize(44, 44)
+        brand.setFixedSize(36, 36)
         rail_layout.addWidget(brand, 0, Qt.AlignmentFlag.AlignHCenter)
         self.inbox_nav = navigation_button("会话", "inbox", lambda: self.tabs.setCurrentIndex(0))
-        self.board_nav = navigation_button("看板", "board", lambda: self.tabs.setCurrentIndex(1))
+        self.board_nav = navigation_button("主任", "board", lambda: self.tabs.setCurrentIndex(1))
         for nav in (self.inbox_nav, self.board_nav):
             nav.setObjectName("nav")
             nav.setCheckable(True)
             rail_layout.addWidget(nav)
         self.inbox_nav.setChecked(True)
         rail_layout.addStretch()
+        self.workspace_badge = label("●", "railStatus")
+        self.workspace_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.workspace_badge.setToolTip("本地工作空间 · 数据与模拟操作保存在本机")
+        self.workspace_badge.setAccessibleName("本地工作空间")
+        rail_layout.addWidget(self.workspace_badge)
+        self.open_button = QToolButton()
+        self.open_button.setObjectName("nav")
+        self.open_button.setIcon(svg_icon("file-search"))
+        self.open_button.setIconSize(QSize(20, 20))
+        self.open_button.setFixedSize(40, 40)
+        self.open_button.setToolTip("选择 Excel 工作簿")
+        self.open_button.setAccessibleName("选择 Excel 工作簿")
+        self.open_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_button.clicked.connect(self.choose_file)
+        rail_layout.addWidget(self.open_button)
         settings_nav = navigation_button("设置", "settings", self.configure_model)
+        self.settings_nav = settings_nav
         settings_nav.setObjectName("nav")
         rail_layout.addWidget(settings_nav)
-        version = label("0.5.2", "muted")
-        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        rail_layout.addWidget(version)
         outer.addWidget(rail)
         workspace, layout = panel()
-        layout.setContentsMargins(22, 17, 22, 12)
-        layout.setSpacing(17)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(12)
         outer.addWidget(workspace, 1)
-        top = QHBoxLayout()
-        top_titles = QVBoxLayout()
-        top_titles.setSpacing(3)
-        top_titles.addWidget(label("共情副驾", "pageTitle"))
-        tagline = label("让每一次回应，都有据可依。", "muted")
-        tagline.setWordWrap(False)
-        top_titles.addWidget(tagline)
-        top.addLayout(top_titles)
-        top.addStretch()
-        self.workspace_badge = label("●  本地工作空间", "pill")
-        top.addWidget(self.workspace_badge)
-        self.open_button = button("选择 Excel", self.choose_file)
-        top.addWidget(self.open_button)
-        layout.addLayout(top)
         self.tabs = QTabWidget()
         self.tabs.tabBar().hide()
         layout.addWidget(self.tabs)
         self.build_inbox()
         self.build_board()
+        self.zoom_percent = 100
+        for key in ("Ctrl++", "Ctrl+="):
+            QShortcut(QKeySequence(key), self, activated=lambda: self.adjust_zoom(1))
+        QShortcut(QKeySequence("Ctrl+-"), self, activated=lambda: self.adjust_zoom(-1))
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=lambda: self.set_zoom(100))
         self.tabs.currentChanged.connect(self.navigate)
         self.statusBar().showMessage("   本地工作空间   /   编辑回复后点击模拟发送")
         self.populate_sessions()
         self.source_timer = QTimer(self)
         self.source_timer.timeout.connect(self.poll_source)
         self.source_timer.start(3000)
+        self.report_timer = QTimer(self)
+        self.report_timer.timeout.connect(self.refresh_board)
+        self.report_timer.start(3000)
         self.refresh_board()
 
     def navigate(self, index):
@@ -325,15 +350,52 @@ class MainWindow(QMainWindow):
         if index == 1:
             self.refresh_board()
 
+    def adjust_zoom(self, direction):
+        levels = (80, 90, 100, 110, 120, 130)
+        index = levels.index(self.zoom_percent)
+        self.set_zoom(levels[max(0, min(len(levels) - 1, index + direction))])
+
+    def set_zoom(self, percent):
+        if percent == self.zoom_percent:
+            return
+        self.chat.preserve_reading_position()
+        self.zoom_percent = percent
+        factor = percent / 100
+        size = lambda value: round(value * factor)
+        self.setStyleSheet(scaled_style(percent))
+        self.rail.setFixedWidth(size(48))
+        self.brand_mark.setFixedSize(size(36), size(36))
+        for nav in (self.inbox_nav, self.board_nav, self.settings_nav, self.open_button):
+            nav.setFixedSize(size(40), size(40))
+            nav.setIconSize(QSize(size(20), size(20)))
+        for action, icon in ((self.filter_button, 16), (self.sort_button, 16),
+                             (self.clear_filters_button, 14)):
+            action.setFixedSize(size(28), size(28))
+            action.setIconSize(QSize(size(icon), size(icon)))
+        for action, width in ((self.risk_evidence, 28), (self.summary_toggle, 30)):
+            action.setFixedSize(size(width), size(width))
+        self.header_avatar.setFixedSize(size(38), size(38))
+        self.composer.setMinimumHeight(size(215))
+        self.message_map.set_zoom(factor)
+        self.sessions.itemDelegate().set_zoom(factor)
+        self.sessions.doItemsLayout()
+        self.task_list.itemDelegate().set_zoom(factor)
+        self.task_list.doItemsLayout()
+        self.chat.set_zoom(factor)
+        self.statusBar().showMessage(f"界面缩放 {percent}% · Ctrl+0 恢复默认", 3000)
+
     def build_inbox(self):
         page, layout = panel()
         layout.setContentsMargins(0, 0, 0, 0)
-        split = QSplitter(Qt.Orientation.Horizontal)
+        self.summary_width = 350
+        split = InboxSplitter()
+        self.inbox_split = split
         split.setChildrenCollapsible(False)
         layout.addWidget(split)
         left, left_layout = panel("surface")
-        left.setMinimumWidth(190)
-        left.setMaximumWidth(210)
+        self.inbox_panel = left
+        left.setMinimumWidth(210)
+        left.setMaximumWidth(360)
         left_layout.setContentsMargins(10, 18, 10, 8)
         heading = QHBoxLayout()
         heading.addWidget(label("收件箱", "heading"))
@@ -345,6 +407,75 @@ class MainWindow(QMainWindow):
         self.search.setPlaceholderText("搜索会话或消息…")
         self.search.textChanged.connect(self.filter_sessions)
         left_layout.addWidget(self.search)
+        filter_row = QHBoxLayout()
+        self.filter_button = QToolButton()
+        self.filter_button.setObjectName("inboxAction")
+        self.filter_button.setFixedSize(28, 28)
+        self.filter_button.setIconSize(QSize(16, 16))
+        self.filter_button.setIcon(svg_icon("list-filter"))
+        self.filter_button.setCheckable(True)
+        self.filter_button.setAccessibleName("展开会话筛选")
+        self.filter_button.setToolTip("按风险、主任上报状态和图片消息筛选")
+        filter_row.addWidget(self.filter_button)
+        self.sort_mode = 'latest'
+        self.sort_button = QToolButton()
+        self.sort_button.setObjectName("inboxAction")
+        self.sort_button.setFixedSize(28, 28)
+        self.sort_button.setIconSize(QSize(16, 16))
+        self.sort_button.setIcon(svg_icon("arrow-down-wide-narrow"))
+        self.sort_button.setAccessibleName("会话排序")
+        self.sort_button.setToolTip("排序：最近消息 · 降序（最新在前）")
+        self.sort_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.sort_button)
+        group = QActionGroup(menu)
+        self.sort_actions = {}
+        for title, mode in [('最近消息  ↓', 'recent'),
+                            ('风险优先（P0 → P1 → 待核实）', 'risk'), ('会话编号', 'session')]:
+            action = menu.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(mode == 'recent')
+            self.sort_actions[mode] = action
+            group.addAction(action)
+            action.triggered.connect(lambda checked=False, m=mode, t=title: self.choose_session_sort(m, t))
+        self.sort_button.setMenu(menu)
+        filter_row.addWidget(self.sort_button)
+        filter_row.addStretch()
+        self.clear_filters_button = QToolButton()
+        self.clear_filters_button.setObjectName("inboxAction")
+        self.clear_filters_button.setFixedSize(28, 28)
+        self.clear_filters_button.setIconSize(QSize(14, 14))
+        self.clear_filters_button.setIcon(svg_icon("x"))
+        self.clear_filters_button.setToolTip("清除筛选与搜索")
+        self.clear_filters_button.setAccessibleName("清除筛选与搜索")
+        self.clear_filters_button.clicked.connect(self.clear_session_filters)
+        filter_row.addWidget(self.clear_filters_button)
+        left_layout.addLayout(filter_row)
+        self.filter_panel = QWidget()
+        filters = QVBoxLayout(self.filter_panel)
+        filters.setContentsMargins(0, 0, 0, 0)
+        filters.setSpacing(6)
+        self.risk_filter = QComboBox()
+        for title, value in [("全部风险等级", ""), ("P0 · 优先核实", "P0"),
+                             ("P1 · 服务风险", "P1"), ("待核实 · 规则未命中", "待核实")]:
+            self.risk_filter.addItem(title, value)
+        self.report_filter = QComboBox()
+        for title, value in [("全部上报状态", ""), ("有待处理上报", "pending"),
+                             ("已上报主任", "reported"), ("未上报主任", "unreported")]:
+            self.report_filter.addItem(title, value)
+        self.image_filter = QComboBox()
+        for title, value in [("全部消息类型", ""), ("含图片消息", "image"), ("仅文字消息", "text")]:
+            self.image_filter.addItem(title, value)
+        for title, combo in [("风险等级", self.risk_filter), ("主任上报状态", self.report_filter),
+                             ("消息类型", self.image_filter)]:
+            combo.setAccessibleName(title)
+            filters.addWidget(combo)
+            combo.currentIndexChanged.connect(self.filter_sessions)
+        self.filter_panel.hide()
+        self.filter_button.toggled.connect(self.filter_panel.setVisible)
+        left_layout.addWidget(self.filter_panel)
+        self.filter_notice = label("", "muted")
+        self.filter_notice.hide()
+        left_layout.addWidget(self.filter_notice)
         self.sessions = QListWidget()
         self.sessions.setItemDelegate(SessionDelegate(self.sessions))
         self.sessions.setMouseTracking(True)
@@ -354,12 +485,13 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.sessions)
         split.addWidget(left)
         center, center_layout = panel()
-        center.setMinimumWidth(450)
+        center.setMinimumWidth(420)
         center_layout.setContentsMargins(4, 0, 4, 0)
         conversation_head, header_layout = panel("surface")
         header_layout.setContentsMargins(16, 13, 16, 13)
         header_row = QHBoxLayout()
         avatar = label("客", "avatar")
+        self.header_avatar = avatar
         avatar.setFixedSize(38, 38)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_row.addWidget(avatar)
@@ -370,16 +502,41 @@ class MainWindow(QMainWindow):
         titles.addWidget(self.title)
         titles.addWidget(self.conversation_meta)
         header_row.addLayout(titles, 1)
-        self.risk_badge = label("待核实", "pill")
+        self.risk_badge = label("待核实", "riskBadge")
         header_row.addWidget(self.risk_badge)
+        self.risk_evidence = QToolButton()
+        self.risk_evidence.setObjectName("evidenceButton")
+        self.risk_evidence.setIcon(svg_icon("file-search"))
+        self.risk_evidence.setFixedSize(28, 28)
+        self.risk_evidence.setToolTip("查看风险依据")
+        self.risk_evidence.setAccessibleName("查看风险依据")
+        self.risk_evidence.clicked.connect(self.show_risk_evidence)
+        header_row.addWidget(self.risk_evidence)
+        self.summary_toggle = QToolButton()
+        self.summary_toggle.setObjectName("panelToggle")
+        self.summary_toggle.setIcon(svg_icon("panel-right"))
+        self.summary_toggle.setFixedSize(30, 30)
+        self.summary_toggle.setCheckable(True)
+        self.summary_toggle.setChecked(True)
+        self.summary_toggle.setAccessibleName("展开或收起服务摘要")
+        self.summary_toggle.setToolTip("收起服务摘要")
+        header_row.addWidget(self.summary_toggle)
         header_layout.addLayout(header_row)
         center_layout.addWidget(conversation_head)
         vertical = QSplitter(Qt.Orientation.Vertical)
         vertical.setChildrenCollapsible(False)
         self.chat = ChatFeed()
         self.chat.setMinimumHeight(180)
-        vertical.addWidget(self.chat)
+        chat_area = QWidget()
+        chat_layout = QHBoxLayout(chat_area)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.setSpacing(2)
+        self.message_map = MessageMap(self.chat)
+        chat_layout.addWidget(self.message_map)
+        chat_layout.addWidget(self.chat, 1)
+        vertical.addWidget(chat_area)
         composer, compose_layout = panel("surface")
+        self.composer = composer
         composer.setMinimumHeight(215)
         compose_layout.setContentsMargins(16, 12, 16, 12)
         compose_layout.setSpacing(5)
@@ -405,6 +562,8 @@ class MainWindow(QMainWindow):
         history_button = button("◷  操作记录", self.show_history)
         history_button.setObjectName("quiet")
         row.addWidget(history_button)
+        self.report_button = button("上报主任", self.report_messages)
+        row.addWidget(self.report_button)
         row.addStretch()
         self.reply_button = button("模拟发送  →", self.reply_customer, True)
         self.reply_button.setToolTip("记录本地模拟回复；当前未接入真实客服渠道")
@@ -416,30 +575,55 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(vertical)
         split.addWidget(center)
         right, right_layout = panel("surface")
-        right.setMinimumWidth(260)
+        right.setMinimumWidth(330)
         right_layout.setContentsMargins(16, 18, 8, 8)
         right_layout.addWidget(label("服务摘要", "heading"))
         self.facts = EvidencePanel()
         self.facts.state_path = self.store.path
         right_layout.addWidget(self.facts)
-        split.addWidget(right)
+        self.summary_panel = SlidingPanel(right)
+        split.addWidget(self.summary_panel)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
-        split.setSizes([200, 610, 420])
+        split.setSizes([240, 710, 350])
+        split.setCollapsible(0, True)
+        split.handle(1).setToolTip("左右拖动调整会话列表；拖到最左侧收起，向右拉开。双击也可切换。")
+        self.summary_toggle.toggled.connect(self.toggle_summary_panel)
         self.tabs.addTab(page, "会话收件箱")
+
+    def toggle_summary_panel(self, visible):
+        self.chat.preserve_reading_position()
+        self.summary_panel.slide(visible)
+        self.summary_toggle.setToolTip("收起服务摘要" if visible else "展开服务摘要")
+
+    def show_risk_evidence(self):
+        if not self.result:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("风险依据 · " + self.result['case']['session_id'])
+        dialog.resize(600, 480)
+        layout = QVBoxLayout(dialog)
+        detail = QTextBrowser()
+        detail.setOpenLinks(False)
+        detail.setHtml(detail_html(risk_html(self.result['risk'])))
+        layout.addWidget(detail)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec()
 
     def build_board(self):
         page, layout = panel()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
-        layout.addWidget(label("任务概览", "pageTitle"))
-        layout.addWidget(label("聚焦需要跟进的客户问题，保留每一步处理依据。", "muted"))
+        layout.addWidget(label("主任工作台", "pageTitle"))
+        layout.addWidget(label("只有客服主动上报才进入提醒；全部聊天可随时查阅。", "muted"))
         cards = QHBoxLayout()
         cards.setSpacing(14)
-        self.metric_cards = [MetricCard("已确认任务", "确认回复后创建", "#526dd4"),
-                             MetricCard("待跟进", "待处理与处理中", "#567692"),
-                             MetricCard("P0 待跟进", "优先核实与升级", "#c25670"),
+        self.metric_cards = [MetricCard("客服上报", "客服主动选择消息并提交", "#526dd4"),
+                             MetricCard("待处理上报", "待处理与处理中", "#567692"),
+                             MetricCard("P0 已上报", "优先核实与升级", "#c25670"),
                              MetricCard("超时提醒", "超过本地演示阈值", "#b78a40")]
         for card in self.metric_cards:
             cards.addWidget(card)
@@ -448,10 +632,10 @@ class MainWindow(QMainWindow):
         tasks_layout.setContentsMargins(20, 16, 20, 16)
         layout.addWidget(tasks_panel, 1)
         row = QHBoxLayout()
-        row.addWidget(label("任务列表", "heading"))
+        row.addWidget(label("上报列表", "heading"))
         row.addStretch()
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["全部", *TRANSITIONS])
+        self.status_filter.addItems(["待处理", "处理中", "已处理", "全部"])
         self.status_filter.currentTextChanged.connect(self.refresh_board)
         row.addWidget(self.status_filter)
         row.addWidget(label("提醒阈值", "muted"))
@@ -461,33 +645,37 @@ class MainWindow(QMainWindow):
         self.threshold.setSuffix(" 小时")
         self.threshold.valueChanged.connect(self.refresh_board)
         row.addWidget(self.threshold)
-        row.addWidget(button("刷新看板", self.refresh_board))
+        row.addWidget(button("查看全部聊天", self.browse_all_chats))
+        row.addWidget(button("刷新", self.refresh_board))
         tasks_layout.addLayout(row)
         self.task_list = QListWidget()
         self.task_list.setItemDelegate(TaskDelegate(self.task_list))
         self.task_list.itemDoubleClicked.connect(self.edit_task)
         tasks_layout.addWidget(self.task_list)
-        self.empty_tasks = label("尚无匹配的任务\n\n在会话中模拟发送回复后，任务会出现在这里。", "muted")
+        self.empty_tasks = label("暂无这类上报\n\n客服选择消息并点击“上报主任”后，才会出现在这里。", "muted")
         self.empty_tasks.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tasks_layout.addWidget(self.empty_tasks, 1)
         footer = QHBoxLayout()
-        board_note = label("本地任务 · 姓名为手工记录 · 时间为 UTC", "muted")
+        board_note = label("本地上报 · 角色为演示入口，尚未接入登录权限 · 时间为 UTC", "muted")
         board_note.setWordWrap(False)
         footer.addWidget(board_note)
         footer.addStretch()
         self.task_action = button("查看与处理  →", self.edit_task, True)
         footer.addWidget(self.task_action)
         tasks_layout.addLayout(footer)
-        self.tabs.addTab(page, "风险看板")
+        self.tabs.addTab(page, "主任工作台")
 
     def populate_sessions(self):
         self.result = None
         self.sessions.clear()
         self.search.clear()
         self.previews = {}
+        self.session_filter_data = {}
         self.model_button.setEnabled(self.provider is not None)
+        self.report_button.setEnabled(self.provider is not None)
         self.reply_button.setEnabled(False)
         if self.provider is None:
+            self.filter_sessions()
             return
         ids = self.provider.sessions()
         ids = list(dict.fromkeys([s for s in ("S00268", "S00001") if s in ids] + ids))
@@ -495,20 +683,98 @@ class MainWindow(QMainWindow):
             messages = self.provider.messages(session)
             latest = messages[-1]["message_text"].replace("\n", " ")
             self.previews[session] = session + " " + " ".join(m["message_text"] for m in messages)
-            item = QListWidgetItem(f"客户 · {session}\n{latest[:25]}…")
+            self.session_filter_data[session] = self.session_filter_metadata(messages)
+            local = self.simulated_chat_messages(session)
+            if local:
+                self.session_filter_data[session]['latest'] = max(messages[-1]['发送时间'], local[-1]['发送时间'])
+            item = SessionItem(f"客户 · {session}\n{latest[:25]}…")
             item.setData(Qt.ItemDataRole.UserRole, session)
             item.setData(Qt.ItemDataRole.UserRole + 1, {"preview": latest, "date": messages[-1]["发送时间"][:10]})
             self.sessions.addItem(item)
         self.session_count.setText(str(len(ids)))
         self.sessions.setCurrentRow(0)
+        self.sort_sessions()
+        self.filter_sessions()
 
-    def filter_sessions(self, text):
+    @staticmethod
+    def session_filter_metadata(messages):
+        return {"risk": assess({"messages": messages})["level"],
+                "latest": messages[-1]['发送时间'],
+                "image": any(m.get("image_path") or m.get("内容类型") == "图片" for m in messages)}
+
+    def choose_session_sort(self, mode, title):
+        if mode == 'recent':
+            mode = 'oldest' if self.sort_mode == 'latest' else 'latest'
+        self.set_session_sort(mode, title)
+
+    def set_session_sort(self, mode, title):
+        self.sort_mode = mode
+        recent = mode in ('latest', 'oldest')
+        arrow = '↑' if mode == 'oldest' else '↓'
+        self.sort_actions['recent'].setText('最近消息  ' + arrow if recent else '最近消息')
+        for key, action in self.sort_actions.items():
+            action.setChecked(key == ('recent' if recent else mode))
+        if recent:
+            title = '最近消息 · ' + ('升序（最早在前）' if mode == 'oldest' else '降序（最新在前）')
+        self.sort_button.setIcon(svg_icon('arrow-up-narrow-wide' if mode == 'oldest' else 'arrow-down-wide-narrow'))
+        self.sort_button.setToolTip("排序：" + title)
+        self.sort_button.setAccessibleName("排序：" + title)
+        self.sort_sessions()
+
+    def sort_sessions(self):
+        for index in range(self.sessions.count()):
+            item = self.sessions.item(index)
+            session = item.data(Qt.ItemDataRole.UserRole)
+            meta = self.session_filter_data[session]
+            if self.sort_mode == 'risk':
+                key = ({'P0': 0, 'P1': 1}.get(meta['risk'], 2), session)
+            elif self.sort_mode == 'session':
+                key = (session,)
+            else:
+                key = (meta['latest'], session)
+            item.setData(Qt.ItemDataRole.UserRole + 2, key)
+        self.sessions.sortItems(Qt.SortOrder.DescendingOrder if self.sort_mode == 'latest' else Qt.SortOrder.AscendingOrder)
+
+    def clear_session_filters(self):
+        for combo in (self.risk_filter, self.report_filter, self.image_filter):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+        self.search.clear()
+        self.filter_sessions()
+
+    def filter_sessions(self, *_):
+        text = self.search.text().strip().casefold()
+        risk, report, image = (c.currentData() for c in
+                               (self.risk_filter, self.report_filter, self.image_filter))
+        statuses = getattr(self, "session_report_statuses", {})
         visible = 0
         for index in range(self.sessions.count()):
             item = self.sessions.item(index)
-            item.setHidden(text.casefold() not in self.previews[item.data(Qt.ItemDataRole.UserRole)].casefold())
+            session = item.data(Qt.ItemDataRole.UserRole)
+            meta = self.session_filter_data[session]
+            reports = statuses.get(session, set())
+            matches = (text in self.previews[session].casefold()
+                       and (not risk or meta["risk"] == risk)
+                       and (not image or bool(meta["image"]) == (image == "image"))
+                       and (not report or (report == "reported" and bool(reports))
+                            or (report == "unreported" and not reports)
+                            or (report == "pending" and bool(reports & {"待处理", "处理中"}))))
+            item.setHidden(not matches)
             visible += not item.isHidden()
         self.session_count.setText(str(visible))
+        active = sum(bool(v) for v in (risk, report, image))
+        self.filter_button.setToolTip(f"筛选：已启用 {active} 项" if active else "按风险、上报状态和图片消息筛选")
+        self.filter_button.setProperty('active', bool(active))
+        self.filter_button.style().unpolish(self.filter_button)
+        self.filter_button.style().polish(self.filter_button)
+        self.clear_filters_button.setVisible(bool(active or text))
+        current = self.sessions.currentItem()
+        notice = "没有符合条件的会话" if not visible else ""
+        if current and current.isHidden():
+            notice += ("\n" if notice else "") + "右侧保留当前会话，选择列表项后切换。"
+        self.filter_notice.setText(notice)
+        self.filter_notice.setVisible(bool(notice))
 
     def remember_draft(self):
         if self.result:
@@ -544,6 +810,9 @@ class MainWindow(QMainWindow):
         self.title.setText(f"客户 {session}")
         self.conversation_meta.setText(f"{len(messages)} 条历史消息  ·  完整会话")
         self.risk_badge.setText(self.result["risk"]["level"] + "  待核实")
+        self.risk_badge.setProperty("level", self.result["risk"]["level"])
+        self.risk_badge.style().unpolish(self.risk_badge)
+        self.risk_badge.style().polish(self.risk_badge)
         self.chat.set_messages(messages + self.simulated_chat_messages(session))
         saved = self.store.composer_draft(self.draft_scope(), session) or {}
         self.draft_fingerprint = saved.get('fingerprint', json.dumps(self.result['case'], sort_keys=True))
@@ -564,6 +833,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, '_source_stamp'):
             stat = self.provider.source.stat()
             self._source_stamp = (stat.st_mtime_ns, stat.st_size)
+        self.filter_sessions()
 
     def poll_source(self):
         """Reload changed local input, but never replace a handover without a click."""
@@ -584,6 +854,15 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage('新资料中未找到当前会话；旧摘要已保留，请重新选择数据。')
                 return
             self.provider = provider
+            for sid in self.session_filter_data:
+                source_messages = provider.messages(sid)
+                self.session_filter_data[sid] = self.session_filter_metadata(source_messages)
+                local = self.simulated_chat_messages(sid)
+                if local:
+                    self.session_filter_data[sid]['latest'] = max(source_messages[-1]['发送时间'], local[-1]['发送时间'])
+                self.previews[sid] = sid + " " + " ".join(m["message_text"] for m in source_messages)
+            self.filter_sessions()
+            self.sort_sessions()
             self._source_stamp = stamp
             self.chat.set_messages(messages + self.simulated_chat_messages(session))
             pane = self.facts.handover
@@ -596,6 +875,9 @@ class MainWindow(QMainWindow):
             self.reply_button.setEnabled(False)
             self.source_label.setText('资料已变化，请清空后重新输入，或重新生成建议后核对。')
             self.risk_badge.setText(risk['level'] + ' · 新资料待核实')
+            self.risk_badge.setProperty("level", risk['level'])
+            self.risk_badge.style().unpolish(self.risk_badge)
+            self.risk_badge.style().polish(self.risk_badge)
             if risk['level'] == 'P0':
                 self.statusBar().showMessage('P0：新资料含不适或就医线索，请优先核实；无需等待摘要更新。')
             self.conversation_meta.setText(f'{len(messages)} 条历史消息 · 已载入新资料，摘要待点击更新')
@@ -645,6 +927,8 @@ class MainWindow(QMainWindow):
         self.draft_revision += 1
         self.source_label.setText('已本地模拟发送 · 未送达外部渠道')
         self.chat.set_messages(self.provider.messages(session) + self.simulated_chat_messages(session))
+        self.session_filter_data[session]['latest'] = max(m['发送时间'] for m in self.chat.messages)
+        self.sort_sessions()
         self.refresh_board()
 
     def show_history(self):
@@ -673,8 +957,21 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def refresh_board(self, *_):
-        tasks = self.store.tasks()
+        try:
+            tasks = self.reports.reports()
+        except (sqlite3.Error, OSError):
+            self.statusBar().showMessage('上报列表读取失败，请稍后刷新。')
+            return
+        statuses = {}
+        for report in tasks:
+            statuses.setdefault(report['session'], set()).add(report['status'])
+        if statuses != getattr(self, 'session_report_statuses', None):
+            self.session_report_statuses = statuses
+            self.filter_sessions()
+        selected = self.task_list.currentItem()
+        selected_id = selected.data(Qt.ItemDataRole.UserRole)['id'] if selected else None
         pending = [t for t in tasks if t["status"] in {"待处理", "处理中"}]
+        self.board_nav.setText("主任" + (f" · {len(pending)}" if pending else ""))
         counts = [len(tasks), len(pending), sum(json.loads(t['payload'])['risk']['level'] == 'P0' for t in pending),
                   sum(overdue(t, self.threshold.value()) for t in tasks)]
         for card, count in zip(self.metric_cards, counts):
@@ -692,6 +989,10 @@ class MainWindow(QMainWindow):
             self.task_list.addItem(item)
         if self.task_list.count():
             self.task_list.setCurrentRow(0)
+            for index in range(self.task_list.count()):
+                if self.task_list.item(index).data(Qt.ItemDataRole.UserRole)['id'] == selected_id:
+                    self.task_list.setCurrentRow(index)
+                    break
         has_tasks = self.task_list.count() > 0
         self.task_list.setVisible(has_tasks)
         self.empty_tasks.setVisible(not has_tasks)
@@ -700,8 +1001,15 @@ class MainWindow(QMainWindow):
     def edit_task(self, *_):
         item = self.task_list.currentItem()
         if item:
-            TaskDialog(self, item.data(Qt.ItemDataRole.UserRole)).exec()
+            HandleReportDialog(self, item.data(Qt.ItemDataRole.UserRole)).exec()
             self.refresh_board()
+
+    def report_messages(self):
+        if self.result:
+            ReportDialog(self).exec()
+
+    def browse_all_chats(self):
+        AllChatsDialog(self).exec()
 
     def choose_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择业务数据", "", "Excel 工作簿 (*.xlsx)")
@@ -774,19 +1082,21 @@ class MainWindow(QMainWindow):
         config = ModelConfig(self.settings.get("base_url", ""), self.settings.get("model", ""), self.api_key)
         try:
             config.validate()
+            summary = self.facts.handover.reply_summary()
         except ValueError as exc:
-            QMessageBox.information(self, "请配置模型", str(exc))
+            QMessageBox.information(self, "请先核对", str(exc))
             return
         self.model_context_session = self.result["case"]["session_id"]
         self.model_input = json.dumps(self.result['case'], sort_keys=True)
         self.model_draft = self.draft.toPlainText()
         self.model_revision = self.draft_revision
         self.model_messages = self.store.simulated_messages(self.model_context_session)
+        self.model_summary_fingerprint = digest(summary)
         self.model_button.setEnabled(False)
         self.open_button.setEnabled(False)
         self.model_button.setText('正在生成…')
         self.statusBar().showMessage("正在生成模型建议…")
-        self.worker = ModelWorker(self.result, config, self, self.model_draft, self.model_messages)
+        self.worker = ModelWorker(self.result, config, self, self.model_draft, self.model_messages, summary)
         self.worker.result_ready.connect(self.model_completed)
         self.worker.finished.connect(self.model_finished)
         self.worker.start()
@@ -804,12 +1114,27 @@ class MainWindow(QMainWindow):
         if self.model_messages != self.store.simulated_messages(self.model_context_session):
             self.source_label.setText('生成期间已有新回复发送，未采用旧建议，请重新生成。')
             return
+        try:
+            current_summary = self.facts.handover.reply_summary()
+        except ValueError:
+            self.statusBar().showMessage('生成期间摘要已变化或需要复核，未采用旧建议。')
+            return
+        if digest(current_summary) != self.model_summary_fingerprint:
+            self.statusBar().showMessage('生成期间摘要或人工纠正已变化，未采用旧建议，请重新生成。')
+            return
         if self.model_draft or self.draft_revision != self.model_revision or self.draft.toPlainText():
+            # The preview is only useful while its supporting handover is current.
             revision = self.draft_revision
             if not self.preview_suggestion(output['text']):
                 return
             if revision != self.draft_revision or self.model_input != json.dumps(self.result['case'], sort_keys=True):
                 self.source_label.setText('预览期间内容已变化，原文已保留，请重新生成。')
+                return
+            try:
+                if digest(self.facts.handover.reply_summary()) != self.model_summary_fingerprint:
+                    raise ValueError('summary changed')
+            except ValueError:
+                self.source_label.setText('预览期间摘要已变化，原文已保留，请重新生成。')
                 return
         self.stale_drafts.discard(self.result['case']['session_id'])
         self.draft_fingerprint = self.model_input
@@ -838,6 +1163,7 @@ class MainWindow(QMainWindow):
 
     def model_finished(self):
         self.model_button.setEnabled(self.provider is not None)
+        self.report_button.setEnabled(self.provider is not None)
         self.model_button.setText('✧  AI 建议')
         self.open_button.setEnabled(True)
         self.update_send_button()
@@ -853,4 +1179,6 @@ class MainWindow(QMainWindow):
             self.source_label.setText('草稿保存失败，请复制回复文字后重试关闭。')
             event.ignore()
             return
+        self.source_timer.stop()
+        self.report_timer.stop()
         event.accept()

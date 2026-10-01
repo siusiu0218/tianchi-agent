@@ -4,24 +4,47 @@ import sqlite3
 import re
 from html import escape
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import Qt, QSize, QThread, Signal
+from PySide6.QtGui import QFontMetrics, QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QDialog,
-    QDialogButtonBox, QTextEdit, QLineEdit, QComboBox, QFormLayout, QMessageBox, QMenu, QSizePolicy,
+    QDialogButtonBox, QTextEdit, QLineEdit, QComboBox, QFormLayout, QMessageBox, QMenu, QSizePolicy, QScrollArea, QToolButton,
 )
 
-from copilot.summary import FIELDS, build_summary, candidates, digest, order_ids
+from copilot.summary import FIELDS, LOCAL_SOURCE, build_summary, candidates, digest, order_ids
 from copilot.summary_store import SummaryStore
+from copilot.checklist import ChecklistStore, suggestions
+from desktop.checklist import ChecklistWidget
 from copilot.agent import assess
 from copilot.llm import ModelConfig
-from copilot.summary_llm import generate_summary, model_context
+from copilot.summary_llm import generate_summary, model_context, SummaryValidationError
 import json
+
+
+def rejected_draft_text(failure):
+    draft = failure.get('draft')
+    try:
+        parsed = json.loads(draft) if isinstance(draft, str) else None
+    except ValueError:
+        parsed = None
+    readable = json.dumps(parsed, ensure_ascii=False, indent=2) if parsed is not None else (draft or '模型未返回可读取的草稿。')
+    refs = set()
+    if isinstance(parsed, dict) and isinstance(parsed.get('items'), list):
+        for item in parsed['items']:
+            if isinstance(item, dict) and isinstance(item.get('refs'), list):
+                refs.update(ref for ref in item['refs'] if isinstance(ref, str))
+    sources = '\n\n'.join(source['ref'] + '：' + source['content']
+                          for source in failure.get('sources', []) if source['ref'] in refs)
+    return ('校验原因：' + failure['reason'] + '\n\n'
+            '以下是未通过校验的模型原稿，未保存为正式摘要，请勿直接作为业务事实。\n\n'
+            '模型草稿：\n' + readable + '\n\n'
+            '草稿引用的来源：\n' + (sources or '没有可对应的来源引用。'))
 
 
 class SummaryWorker(QThread):
     ready = Signal(object)
     failed = Signal(str)
+    rejected = Signal(object)
 
     def __init__(self, summary, config, parent):
         super().__init__(parent)
@@ -30,6 +53,8 @@ class SummaryWorker(QThread):
     def run(self):
         try:
             self.ready.emit(generate_summary(self.summary, self.config))
+        except SummaryValidationError as exc:
+            self.rejected.emit({'reason': str(exc), 'draft': exc.draft, 'sources': exc.sources})
         except Exception:
             self.failed.emit('模型未返回合规摘要，旧摘要和人工纠正已保留。请检查模型配置或稍后重试。')
 
@@ -119,6 +144,68 @@ class CorrectionDialog(QDialog):
         self.accept()
 
 
+FIELD_TITLES = {'诉求': '客户当前诉求', '经过概述': '前期沟通情况',
+                '待解决': '待确认内容', '建议': '建议处理方式'}
+
+
+class HandoverEditDialog(QDialog):
+    """One review action for all four displayed fields, retaining item evidence."""
+
+    def __init__(self, pane):
+        super().__init__(pane)
+        self.pane = pane
+        self.setWindowTitle('修改接手要点')
+        self.resize(720, 650)
+        layout = QVBoxLayout(self)
+        layout.addWidget(plain('按原文逐项核对后修改。待确认内容请在清单中逐项修改。原始记录与风险等级不会改变。'))
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        container = QWidget(scroll)
+        fields = QVBoxLayout(container)
+        self.editors = []
+        for field in ('诉求', '经过概述', '建议'):
+            fields.addWidget(plain(FIELD_TITLES[field]))
+            for item in pane.displayed['items']:
+                if item['field'] != field:
+                    continue
+                if item.get('conflict'):
+                    fields.addWidget(plain('这项来源已变化，请对照新证据复核。'))
+                fields.addWidget(plain(item['topic']))
+                editor = QTextEdit(container)
+                editor.setAcceptRichText(False)
+                editor.setPlainText(item['text'])
+                editor.setMinimumHeight(72)
+                fields.addWidget(editor)
+                self.editors.append((item, editor))
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+        form = QFormLayout()
+        self.actor, self.reason = QLineEdit(), QLineEdit()
+        form.addRow('操作人', self.actor)
+        form.addRow('修改／核实说明', self.reason)
+        layout.addLayout(form)
+        self.error = plain('')
+        layout.addWidget(self.error)
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        controls.accepted.connect(self.save)
+        controls.rejected.connect(self.reject)
+        layout.addWidget(controls)
+
+    def save(self):
+        changes = [(item, editor.toPlainText()) for item, editor in self.editors
+                   if editor.toPlainText().strip() != item['text']]
+        if not changes:
+            self.accept()
+            return
+        try:
+            self.pane.ledger.correct_many(self.pane.session, changes, self.actor.text(), self.reason.text())
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            return
+        self.pane.render()
+        self.accept()
+
+
 class LinkDialog(QDialog):
     def __init__(self, pane):
         super().__init__(pane)
@@ -192,16 +279,22 @@ class HandoverPane(QWidget):
     def __init__(self, provider, state_path, session, parent=None):
         super().__init__(parent)
         self.provider, self.session = provider, session
-        self.ledger = SummaryStore(state_path, digest(str(Path(provider.source).resolve()).casefold()))
+        namespace = digest(str(Path(provider.source).resolve()).casefold())
+        self.ledger = SummaryStore(state_path, namespace)
+        self.checklist = ChecklistStore(state_path, namespace)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(8)
         self.pending = self.generate()
-        self.raw = self.ledger.latest(session)
-        if self.raw is None:
-            self.raw = self.pending
-            self.ledger.save(session, self.raw)
+        saved = self.ledger.latest(session)
+        # Earlier versions saved a local draft merely by opening a session.
+        # That draft is not evidence that a person chose to generate a summary.
+        legacy_auto = (saved and saved.get('source') == LOCAL_SOURCE
+                       and not saved.get('explicit') and not self.ledger.history(session))
+        self.raw = saved if saved and not legacy_auto else {
+            **self.pending, 'items': [], 'source': '', 'topics': []}
         self.changed = set()
+        self.rejected_draft = None
         self.render()
 
     def generate(self):
@@ -224,20 +317,34 @@ class HandoverPane(QWidget):
     def refresh_pending(self):
         try:
             self.pending = self.generate()
+            if self.raw.get('source') == LOCAL_SOURCE and self.source_changed():
+                self.pending['source'] = LOCAL_SOURCE
+                self.model_ready(self.pending)
+                return
             self.urgent.setText(self.risk_text())
             self.urgent.setToolTip('\n'.join(e['quote'] + '\n消息 ' + e['message_id'] for e in self.pending['risk']['evidence']))
             self.urgent.setObjectName('summaryRisk' if self.pending['risk']['level'] == 'P0' else 'muted')
             self.urgent.style().unpolish(self.urgent)
             self.urgent.style().polish(self.urgent)
             self.notice.setText(self.notice_text())
-            self.update_button.setText('更新摘要' if self.raw.get('source') else '生成摘要')
+            self.update_button.setText('生成摘要' if not self.raw.get('source') else
+                                       ('AI 更新摘要' if self.source_changed() else 'AI 精炼摘要'))
         except (OSError, ValueError, KeyError, sqlite3.Error):
             self.notice.setText('读取新信息失败，保留旧摘要，请重新载入资料后重试。')
 
     def notice_text(self):
-        if self.pending['fingerprint'] != self.raw['fingerprint']:
-            return '有新记录 · 摘要待更新'
+        if not self.raw.get('source'):
+            return '摘要尚未生成 · 点击“生成摘要”后显示接手要点'
+        if self.source_changed():
+            return '有新记录 · 摘要待更新；可在“查看详情”中选择本地重新整理'
         return self.raw.get('source', '尚未生成 · 点击下方生成摘要')
+
+    def source_changed(self):
+        """Compare source facts, ignoring a digest change caused only by code version."""
+        if not self.raw.get('source'):
+            return False
+        return any(self.pending.get(key) != self.raw.get(key)
+                   for key in ('evidence', 'coverage', 'inactive_links'))
 
     def risk_text(self):
         risk = self.pending['risk']
@@ -247,6 +354,21 @@ class HandoverPane(QWidget):
 
     def update_summary(self):
         self.generate_model()
+
+    def reply_summary(self):
+        current = self.generate()
+        self.pending = current
+        if not self.raw.get('source'):
+            return None
+        if self.source_changed():
+            raise ValueError('资料已变化，请在“查看详情”中选择“按最新记录重新整理（本地）”，核对后再生成回复。')
+        summary = self.ledger.apply(self.session, self.raw)
+        summary['risk'] = current['risk']
+        if any(i.get('conflict') for i in summary['items']):
+            raise ValueError('摘要中有人工纠正需要复核，请先核对后再生成回复。')
+        summary['checklist'] = [{'text': item['text'], 'done': bool(item['done']), 'refs': item['refs']}
+                                for item in self.checklist.items(self.session)]
+        return summary
 
     def fold(self, title, value):
         button = QPushButton('▸ ' + title, self)
@@ -283,35 +405,24 @@ class HandoverPane(QWidget):
         self.layout.addWidget(self.urgent)
         self.notice = plain(self.notice_text())
         self.notice.setObjectName('muted')
-        self.notice.setToolTip('；'.join(k + ' ' + v for k, v in self.raw['coverage'].items()))
-        self.update_button = QPushButton('更新摘要' if self.raw.get('source') else '生成摘要')
+        self.notice.setToolTip('；'.join(k + ' ' + v for k, v in self.pending['coverage'].items()))
+        self.update_button = QPushButton('生成摘要' if not self.raw.get('source') else
+                                         ('AI 更新摘要' if self.source_changed() else 'AI 精炼摘要'))
         self.update_button.setObjectName('summaryAction')
         self.update_button.clicked.connect(self.update_summary)
         data = self.ledger.apply(self.session, self.raw)
         self.displayed = data
+        # The model summary is prose for review; checklist proposals come from
+        # the deterministic source pass so a rephrased model item does not
+        # duplicate an existing follow-up action.
+        self.checklist.sync(self.session, suggestions(self.pending) if self.raw.get('source') else [],
+                            retire_stale=True)
         available = [i for i in data['items'] if self.raw.get('source') or i.get('correction')]
-        overview = ' '.join(dict.fromkeys(i['text'] for i in available if i['field'] == '经过概述'))
-        pending = ' '.join(dict.fromkeys(i['text'] for i in available if i['field'] == '待解决'))
-        requests = ' '.join(dict.fromkeys(i['text'] for i in available if i['field'] == '诉求'))
-        # Use complete saved clauses; elision is only a visual preview, never a
-        # rewritten fact or a replacement for the saved/corrected summary.
-        sentences = [s for s in re.split(r'(?<=[。！？])', overview) if s.strip()]
-        issue = '、'.join(self.raw.get('topics', [])) if available else '待生成'
+        issue = '、'.join(self.pending.get('topics', [])) if available else '待生成'
         self.problem_label = plain('问题：' + (issue or '待核实'))
         self.problem_label.setStyleSheet('font-weight:600;')
         self.layout.addWidget(self.problem_label)
-        heading = plain('概述：')
-        heading.setObjectName('summaryHeading')
-        self.layout.addWidget(heading)
-        lines = [sentences[0] if sentences else (requests or '待生成')]
-        progress = ''.join(sentences[1:])
-        if progress or requests:
-            lines.append(progress or requests)
-        if pending:
-            lines.append(pending)
-        self.overview = CompactOverview(lines, self.pending['risk']['level'] == 'P0', self)
-        self.layout.addWidget(self.overview)
-        self.full_toggle = QPushButton('▸ 完整摘要', self)
+        self.full_toggle = QPushButton('▾ 接手要点', self)
         self.full_toggle.setObjectName('fold')
         self.full_toggle.setCheckable(True)
         self.full_summary = QWidget(self)
@@ -319,15 +430,29 @@ class HandoverPane(QWidget):
         full_layout.setContentsMargins(0, 0, 0, 0)
         full_layout.setSpacing(8)
         self.full_toggle.toggled.connect(self.full_summary.setVisible)
-        self.full_toggle.toggled.connect(lambda yes: self.full_toggle.setText(('▾ ' if yes else '▸ ') + '完整摘要'))
+        self.full_toggle.toggled.connect(lambda yes: self.full_toggle.setText(('▾ ' if yes else '▸ ') + '接手要点'))
         self.layout.addWidget(self.full_toggle)
         self.layout.addWidget(self.full_summary)
-        self.full_summary.hide()
+        self.full_toggle.setChecked(True)
         self.field_labels = {}
-        for field in FIELDS:
-            heading = plain(field + '：')
+        for field in ('诉求', '经过概述', '建议', '待解决'):
+            heading = plain(FIELD_TITLES[field] + '：')
             heading.setObjectName('summaryHeading')
-            full_layout.addWidget(heading)
+            field_header = QHBoxLayout()
+            field_header.addWidget(heading)
+            evidence_button = QToolButton(self.full_summary)
+            evidence_button.setObjectName('evidenceButton')
+            evidence_button.setIcon(QIcon(str(Path(__file__).resolve().parent / 'assets' / 'file-search.svg')))
+            evidence_button.setIconSize(QSize(17, 17))
+            evidence_button.setFixedSize(28, 28)
+            evidence_button.setToolTip('查看依据')
+            evidence_button.setAccessibleName(FIELD_TITLES[field] + ' · 查看依据')
+            evidence_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            evidence_button.clicked.connect(lambda checked=False, f=field: self.show_field(f))
+            evidence_button.setEnabled(bool(self.raw.get('source')))
+            field_header.addWidget(evidence_button)
+            field_header.addStretch()
+            full_layout.addLayout(field_header)
             rows = [x for x in data['items'] if x['field'] == field and (self.raw.get('source') or x.get('correction'))]
             lines = []
             for item in rows:
@@ -336,27 +461,50 @@ class HandoverPane(QWidget):
                 if item.get('conflict'):
                     prefix += '〔纠正需复核〕'
                 lines.append(prefix + item['text'])
-            body = plain('\n'.join(dict.fromkeys(lines)) or '待生成')
+            body = plain('\n'.join(dict.fromkeys(lines)) or
+                         ('待生成' if not self.raw.get('source') else '现有记录未显示该项内容，请人工核对。'))
             body.setObjectName('summaryBody')
             body.setTextFormat(Qt.TextFormat.RichText)
             body.setText(emphasize(body.text(), self.pending['risk']['level'] == 'P0'))
             self.field_labels[field] = body
-            full_layout.addWidget(body)
+            if field == '待解决':
+                # Keep the source summary available through "查看依据"; the live
+                # handover surface is the human-controlled checklist.
+                self.checklist_widget = None
+                if self.raw.get('source') or self.checklist.items(self.session):
+                    self.checklist_widget = ChecklistWidget(self.checklist, self.session,
+                                                           data['evidence'], self.full_summary)
+                    full_layout.addWidget(self.checklist_widget)
+                else:
+                    full_layout.addWidget(plain('待生成'))
+            else:
+                full_layout.addWidget(body)
         if data['orphaned_edits']:
             self.layout.addWidget(plain('有人工纠正待匹配 · 请在详情中核对'))
         if self.raw.get('inactive_links'):
             self.layout.addWidget(plain('部分关联的订单依据已失效，未纳入：' + '、'.join(self.raw['inactive_links'])))
         self.layout.addWidget(self.notice)
+        self.rejected_button = QPushButton('查看未通过的 AI 草稿与原因', self)
+        self.rejected_button.clicked.connect(self.show_rejected_draft)
+        self.rejected_button.setVisible(self.rejected_draft is not None)
+        self.layout.addWidget(self.rejected_button)
         actions = QWidget(self)
         row = QHBoxLayout(actions)
         row.setContentsMargins(0, 4, 0, 0)
+        self.correct_button = QPushButton('修改接手要点', actions)
+        self.correct_button.setObjectName('summaryAction')
+        self.correct_button.clicked.connect(lambda: HandoverEditDialog(self).exec())
+        self.correct_button.setEnabled(bool(self.raw.get('source')))
+        row.addWidget(self.correct_button)
         row.addWidget(self.update_button)
         details = QPushButton('查看详情', actions)
         details.setObjectName('summaryAction')
         menu = QMenu(details)
         for field in FIELDS:
-            menu.addAction(field + ' · 依据与纠正', lambda f=field: self.show_field(f))
+            action = menu.addAction(FIELD_TITLES[field] + ' · 查看依据', lambda f=field: self.show_field(f))
+            action.setEnabled(bool(self.raw.get('source')))
         menu.addSeparator()
+        menu.addAction('按最新记录重新整理（本地）', self.update_local)
         menu.addAction('风险依据', lambda: self.show_text('风险依据', '\n\n'.join(e['quote'] + '\n消息 ' + e['message_id'] for e in self.pending['risk']['evidence']) or '暂无触发证据'))
         menu.addAction('原文时间线', lambda: self.show_text('原文时间线', '\n\n'.join(x['时间'] + ' · ' + x['会话'] + ' · ' + x['角色'] + '\n' + x['原文'] + '\n' + x['ref'] for x in data['timeline'])))
         menu.addAction('人工修改记录', lambda: self.show_text('人工修改记录', '\n\n'.join(x['created'] + ' · ' + x['actor'] + '\n' + x['item'] + '\n原内容：' + x['original'] + '\n修改：' + x['edited'] + '\n说明：' + x['reason'] for x in self.ledger.history(self.session)) or '暂无人工修改'))
@@ -366,6 +514,12 @@ class HandoverPane(QWidget):
         row.addWidget(details)
         row.addStretch()
         self.layout.addWidget(actions)
+
+    def update_local(self):
+        current = self.generate()
+        current['source'] = LOCAL_SOURCE
+        current['explicit'] = True
+        self.model_ready(current)
 
     def show_text(self, title, value):
         dialog = QDialog(self)
@@ -377,6 +531,15 @@ class HandoverPane(QWidget):
         viewer.setPlainText(value)
         layout.addWidget(viewer)
         dialog.exec()
+
+    def show_rejected_draft(self):
+        if self.rejected_draft:
+            self.show_text('未通过的 AI 草稿 · 仅供核对', rejected_draft_text(self.rejected_draft))
+
+    def model_rejected(self, failure):
+        self.rejected_draft = failure
+        self.notice.setText('AI 摘要未通过校验，旧摘要和人工纠正已保留。原因：' + failure['reason'])
+        self.rejected_button.show()
 
     def show_evidence(self, item):
         dialog = QDialog(self)
@@ -391,7 +554,7 @@ class HandoverPane(QWidget):
 
     def show_field(self, field):
         dialog = QDialog(self)
-        dialog.setWindowTitle(field + ' · 完整内容与依据')
+        dialog.setWindowTitle(FIELD_TITLES[field] + ' · 完整内容与依据')
         dialog.resize(700, 570)
         layout = QVBoxLayout(dialog)
         selector = QComboBox()
@@ -409,12 +572,6 @@ class HandoverPane(QWidget):
             extra = '\n当前系统表述：' + item['generated'] if item.get('conflict') else ''
             viewer.setPlainText(item['text'] + extra + '\n\n来源依据：\n\n' + '\n\n'.join(r + '\n' + '\n'.join(f'{k}：{v}' for k, v in self.raw['evidence'][r].items()) for r in item['refs']))
         selector.currentIndexChanged.connect(show)
-        edit = QPushButton('纠正这一项')
-        def correct():
-            if selector.currentData() and CorrectionDialog(self, selector.currentData()).exec():
-                dialog.accept()
-        edit.clicked.connect(correct)
-        layout.addWidget(edit)
         show()
         dialog.exec()
 
@@ -448,22 +605,28 @@ class HandoverPane(QWidget):
         confirm.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
         if confirm.exec() != QMessageBox.StandardButton.Ok:
             return
+        self.rejected_draft = None
+        self.rejected_button.hide()
         self.notice.setText('正在概括服务经过、诉求和待办…旧摘要保持可见。')
         self.setEnabled(False)
         for name in ('sessions', 'open_button', 'model_button'):
             widget = getattr(root, name, None)
             if widget:
                 widget.setEnabled(False)
-        worker = SummaryWorker(pending, config, self)
+        worker = SummaryWorker(pending, config, root)
         root.summary_worker = worker
         worker.ready.connect(self.model_ready)
         worker.failed.connect(self.notice.setText)
+        worker.rejected.connect(self.model_rejected)
         def finish():
+            if root.summary_worker is worker:
+                root.summary_worker = None
             self.setEnabled(True)
             for name in ('sessions', 'open_button', 'model_button'):
                 widget = getattr(root, name, None)
                 if widget:
                     widget.setEnabled(True)
+            worker.deleteLater()
         worker.finished.connect(finish)
         worker.start()
 
@@ -478,6 +641,7 @@ class HandoverPane(QWidget):
             self.removed = set(previous) - {i['id'] for i in result['items']}
             self.ledger.save(self.session, result)
             self.raw = result
+            self.rejected_draft = None
             self.render()
         except (ValueError, KeyError, OSError, sqlite3.Error):
             self.notice.setText('保存摘要失败，旧版本和人工纠正已保留。')

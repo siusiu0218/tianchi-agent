@@ -5,12 +5,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import QApplication, QPushButton, QToolButton
 
 from copilot.data import ExcelProvider
-from copilot.summary import candidates, FIELDS
+from copilot.summary import candidates, FIELDS, LOCAL_SOURCE
+from copilot.checklist import suggestions
 from copilot.summary_store import SummaryStore
-from desktop.handover import HandoverPane, CorrectionDialog, LinkDialog, emphasize
+from desktop.handover import HandoverPane, CorrectionDialog, HandoverEditDialog, LinkDialog, emphasize, rejected_draft_text
 
 
 class HandoverTests(unittest.TestCase):
@@ -27,6 +29,8 @@ class HandoverTests(unittest.TestCase):
         self.provider.source.touch()
         self.path = Path(self.temp.name) / 'state.sqlite3'
         self.pane = HandoverPane(self.provider, self.path, 'S00001')
+        self.pane.update_local()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self.pane.show()
 
     def tearDown(self):
@@ -58,15 +62,17 @@ class HandoverTests(unittest.TestCase):
         old = self.pane.raw['fingerprint']
         self.add_message('换货还没收到，我现在想改退款')
         self.pane.refresh_pending()
-        self.assertEqual(old, self.pane.raw['fingerprint'])
+        self.assertNotEqual(old, self.pane.raw['fingerprint'])
         self.assertTrue(self.pane.update_button.isEnabled())
+        self.assertTrue(self.pane.changed)
         result = self.pane.generate()
         result['source'] = '模型概括 · 待人工核对'
         self.pane.model_ready(result)
         corrected = next(i for i in self.pane.displayed['items'] if i['id'] == item['id'])
         self.assertEqual(corrected['text'], '人工核实：希望换货')
         self.assertTrue(corrected['conflict'])
-        self.assertTrue(self.pane.changed)
+        with self.assertRaisesRegex(ValueError, '复核'):
+            self.pane.reply_summary()
 
     def test_failed_update_keeps_prior_version(self):
         old = copy.deepcopy(self.pane.raw)
@@ -78,7 +84,28 @@ class HandoverTests(unittest.TestCase):
         self.assertEqual(old, self.pane.ledger.latest('S00001'))
         self.assertIn('失败', self.pane.notice.text())
 
-    def test_compact_preview_preserves_full_text_and_stays_saved_until_update(self):
+    def test_rejected_model_draft_is_reviewable_without_replacing_summary(self):
+        before = copy.deepcopy(self.pane.raw)
+        failure = {
+            'reason': '诉求 / 补差价 含无来源数字 40；请核对该项 refs',
+            'draft': '{"items":[{"field":"诉求","topic":"补差价","text":"等待40元到账","refs":["e0"]}]}',
+            'sources': [{'ref': 'e0', 'content': '{"原文":"等待核实"}'}],
+        }
+        self.pane.model_rejected(failure)
+
+        self.assertTrue(self.pane.rejected_button.isVisible())
+        self.assertIn('40', self.pane.notice.text())
+        self.assertIn('等待40元到账', rejected_draft_text(self.pane.rejected_draft))
+        self.assertIn('e0：', rejected_draft_text(self.pane.rejected_draft))
+        self.assertEqual(self.pane.raw, before)
+        self.assertEqual(self.pane.ledger.latest('S00001'), before)
+        result = self.pane.generate()
+        result['source'] = '模型概括 · 待人工核对'
+        self.pane.model_ready(result)
+        self.assertIsNone(self.pane.rejected_draft)
+        self.assertFalse(self.pane.rejected_button.isVisible())
+
+    def test_four_fields_visible_and_model_text_stays_saved_until_update(self):
         result = self.pane.generate()
         result['source'] = '测试摘要 · 待人工核对'
         for item in result['items']:
@@ -87,17 +114,19 @@ class HandoverTests(unittest.TestCase):
                 item['text'] = '消费者报告商品破损。客服称已登记换货，消费者等待收货。'
         self.pane.model_ready(result)
         self.app.processEvents()
-        self.assertTrue(self.pane.full_summary.isHidden())
-        self.assertIn('未提供姓名', self.pane.consumer_label.text())
-        self.assertLessEqual(len(self.pane.overview.lines), 3)
-        self.pane.full_toggle.click()
         self.assertFalse(self.pane.full_summary.isHidden())
+        self.assertIn('未提供姓名', self.pane.consumer_label.text())
+        self.pane.full_toggle.click()
+        self.assertTrue(self.pane.full_summary.isHidden())
+        self.pane.full_toggle.click()
         self.assertIn('消费者报告商品破损', self.pane.field_labels['经过概述'].text())
-        old_lines = self.pane.overview.lines[:]
+        old_lines = {f: label.text() for f, label in self.pane.field_labels.items()}
         self.add_message('现在不换货了，我想退款')
         self.pane.refresh_pending()
-        self.assertEqual(old_lines, self.pane.overview.lines)
+        self.assertEqual(old_lines, {f: label.text() for f, label in self.pane.field_labels.items()})
         self.assertIn('摘要待更新', self.pane.notice.text())
+        with self.assertRaisesRegex(ValueError, '重新整理'):
+            self.pane.reply_summary()
 
     def test_emphasis_escapes_markup_and_preserves_risk_negation(self):
         rendered = emphasize('<img src=x>消费者尚未就医，要求退款。', True)
@@ -121,12 +150,94 @@ class HandoverTests(unittest.TestCase):
 
         self.assertEqual(generate_model.call_count, 2)
 
-    def test_no_model_summary_keeps_keyword_extracts_out_of_summary_body(self):
-        self.assertFalse(self.pane.raw.get('source'))
+    def test_explicit_local_summary_visible_without_model(self):
+        self.assertEqual(self.pane.raw.get('source'), LOCAL_SOURCE)
         self.assertTrue(any(item['text'] for item in self.pane.raw['items']))
         self.assertEqual(set(self.pane.field_labels), set(FIELDS))
         for label in self.pane.field_labels.values():
-            self.assertEqual(label.text(), '待生成')
+            self.assertNotEqual(label.text(), '待生成')
+        self.assertIn('实际发出', self.pane.field_labels['待解决'].text())
+        self.assertFalse(self.pane.full_summary.isHidden())
+        self.assertEqual(self.pane.reply_summary()['fingerprint'], self.pane.raw['fingerprint'])
+
+    def test_new_and_legacy_auto_sessions_stay_blank_until_generation(self):
+        empty_path = Path(self.temp.name) / 'empty.sqlite3'
+        blank = HandoverPane(self.provider, empty_path, 'S00070')
+        self.assertIsNone(blank.ledger.latest('S00070'))
+        self.assertEqual(blank.update_button.text(), '生成摘要')
+        self.assertEqual({label.text() for label in blank.field_labels.values()}, {'待生成'})
+        self.assertEqual(blank.checklist.items('S00070'), [])
+        self.assertIsNone(blank.reply_summary())
+        self.assertIn('P0', blank.urgent.text())
+        blank.update_local()
+        self.assertEqual(blank.raw['source'], LOCAL_SOURCE)
+        self.assertTrue(blank.raw['explicit'])
+        self.assertEqual(len(blank.checklist.items('S00070')), 2)
+        blank.close()
+        generated_again = HandoverPane(self.provider, empty_path, 'S00070')
+        self.assertEqual(generated_again.raw['source'], LOCAL_SOURCE)
+        self.assertEqual(len(generated_again.checklist.items('S00070')), 2)
+        generated_again.close()
+
+        legacy_path = Path(self.temp.name) / 'legacy.sqlite3'
+        legacy = HandoverPane(self.provider, legacy_path, 'S00070')
+        old = legacy.generate()
+        old['source'] = LOCAL_SOURCE
+        legacy.ledger.save('S00070', old)
+        legacy.checklist.sync('S00070', suggestions(old))
+        legacy.close()
+        reopened = HandoverPane(self.provider, legacy_path, 'S00070')
+        self.assertEqual({label.text() for label in reopened.field_labels.values()}, {'待生成'})
+        self.assertEqual(reopened.update_button.text(), '生成摘要')
+        self.assertEqual(reopened.checklist.items('S00070'), [])
+        reopened.close()
+
+    def test_old_fingerprint_with_same_sources_does_not_block_reply(self):
+        self.pane.raw['source'] = '本地整理 · 待人工核对'
+        self.pane.raw['fingerprint'] = 'older-summary-version'
+        self.pane.pending = self.pane.generate()
+        self.assertNotIn('有新记录', self.pane.notice_text())
+        self.assertEqual(self.pane.reply_summary()['source'], '本地整理 · 待人工核对')
+
+    def test_one_edit_dialog_updates_two_fields(self):
+        dialog = HandoverEditDialog(self.pane)
+        self.assertEqual(len(dialog.editors), sum(i['field'] != '待解决' for i in self.pane.displayed['items']))
+        first = next((item, editor) for item, editor in dialog.editors if item['field'] == '诉求')
+        second = next((item, editor) for item, editor in dialog.editors if item['field'] == '建议')
+        first[1].setPlainText('人工核对后的客户诉求')
+        second[1].setPlainText('人工核对后的建议方式')
+        dialog.actor.setText('测试员')
+        dialog.reason.setText('核对原文')
+        dialog.save()
+        edits = self.pane.ledger.history('S00001')
+        self.assertEqual(len(edits), 2)
+        self.assertEqual({row['edited'] for row in edits}, {'人工核对后的客户诉求', '人工核对后的建议方式'})
+        self.assertFalse(any(item.get('conflict') for item in self.pane.reply_summary()['items']))
+
+    def test_four_headings_have_evidence_and_one_edit_action(self):
+        text = [button.text() for button in self.pane.findChildren(QPushButton)]
+        self.assertEqual(text.count('修改接手要点'), 1)
+        layout = self.pane.full_summary.layout()
+        headings = [layout.itemAt(index).layout().itemAt(0).widget().text()
+                    for index in range(0, layout.count(), 2)]
+        self.assertEqual(headings, ['客户当前诉求：', '前期沟通情况：',
+                                    '建议处理方式：', '待确认内容：'])
+        evidence_buttons = self.pane.findChildren(QToolButton, 'evidenceButton')
+        self.assertEqual(len(evidence_buttons), 4)
+        self.assertTrue(all(button.toolTip() == '查看依据' and not button.icon().isNull()
+                            and button.width() == 28 for button in evidence_buttons))
+        with patch.object(self.pane, 'show_field') as show_field:
+            evidence_buttons[0].click()
+            show_field.assert_called_once_with('诉求')
+        for title in ('客户当前诉求：', '前期沟通情况：', '待确认内容：', '建议处理方式：'):
+            self.assertTrue(any(label.text() == title for label in self.pane.findChildren(type(self.pane.notice))))
+
+    def test_multi_edit_conflict_saves_nothing(self):
+        items = self.pane.displayed['items'][:2]
+        self.pane.ledger.correct('S00001', items[1], '先前修改', '测试员', '核对原文')
+        with self.assertRaisesRegex(ValueError, '已被修改'):
+            self.pane.ledger.correct_many('S00001', [(items[0], '新的第一项'), (items[1], '新的第二项')], '测试员', '核对原文')
+        self.assertEqual([row['edited'] for row in self.pane.ledger.history('S00001')], ['先前修改'])
 
     def test_model_response_from_old_records_is_not_saved(self):
         previous = copy.deepcopy(self.pane.raw)
@@ -150,7 +261,7 @@ class HandoverTests(unittest.TestCase):
         old = self.pane.raw['fingerprint']
         self.add_message('用了之后红肿刺痛，现在在医院')
         self.pane.refresh_pending()
-        self.assertEqual(self.pane.raw['fingerprint'], old)
+        self.assertNotEqual(self.pane.raw['fingerprint'], old)
         self.assertIn('P0', self.pane.urgent.text())
         self.assertIn('医院', self.pane.urgent.toolTip())
         self.assertNotIn('医院', self.pane.urgent.text())

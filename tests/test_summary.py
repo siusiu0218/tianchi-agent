@@ -25,6 +25,17 @@ class SummaryTests(unittest.TestCase):
         pending = [i['text'] for i in result['items'] if i['field'] == '待解决']
         self.assertTrue(any('待核实' in x for x in pending))
 
+    def test_replacement_acknowledgement_and_explicit_pending_steps(self):
+        c = case(texts=[('买家', '泵头坏了'), ('客服', '已登记换货，先给您寄新品'), ('买家', '行，那尽快哈')])
+        result = build_summary([c])
+        acknowledgement = next(i for i in result['items'] if i['topic'] == '换货方案回应')
+        self.assertEqual(acknowledgement['refs'], ['a/1', 'a/2'])
+        self.assertTrue(any('是否实际发出' in i['text'] and '是否收到' in i['text'] for i in result['items']))
+        c['messages'].append({'message_id': '3', '角色': '买家', '发送时间': '2026-05-10 11:00:00',
+                              'message_text': '我现在不想换货了，要退款'})
+        result = build_summary([c])
+        self.assertFalse(any(i['topic'] == '换货方案回应' for i in result['items']))
+
     def test_question_not_application_and_negation(self):
         result = build_summary([case(texts=[('买家', '没有过敏，请问可以退款吗')])])
         self.assertNotIn('使用不适', result['topics'])
@@ -115,6 +126,15 @@ class SummaryTests(unittest.TestCase):
         self.assertNotIn('商品与换货', summary('S00040')['topics'])
         self.assertTrue(any(':结果' in x['topic'] for x in summary('S00056')['items']))
         self.assertIn('商品与换货', summary('S00102')['topics'])
+
+    def test_service_promises_do_not_create_unrelated_s00070_topics(self):
+        provider = ExcelProvider()
+        session = 'S00070'
+        result = build_summary([provider.get_case(session, provider.messages(session)[-1]['发送时间'])])
+        self.assertIn('退款与费用', result['topics'])
+        self.assertNotIn('物流进度', result['topics'])
+        self.assertNotIn('商品咨询', result['topics'])
+        self.assertNotIn('价格与优惠', result['topics'])
 
 
 if __name__ == '__main__':
