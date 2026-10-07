@@ -439,7 +439,7 @@ class HandoverPane(QWidget):
             heading = plain(FIELD_TITLES[field] + '：')
             heading.setObjectName('summaryHeading')
             field_header = QHBoxLayout()
-            field_header.addWidget(heading)
+            field_header.setSpacing(6)
             evidence_button = QToolButton(self.full_summary)
             evidence_button.setObjectName('evidenceButton')
             evidence_button.setIcon(QIcon(str(Path(__file__).resolve().parent / 'assets' / 'file-search.svg')))
@@ -451,6 +451,7 @@ class HandoverPane(QWidget):
             evidence_button.clicked.connect(lambda checked=False, f=field: self.show_field(f))
             evidence_button.setEnabled(bool(self.raw.get('source')))
             field_header.addWidget(evidence_button)
+            field_header.addWidget(heading)
             field_header.addStretch()
             full_layout.addLayout(field_header)
             rows = [x for x in data['items'] if x['field'] == field and (self.raw.get('source') or x.get('correction'))]
@@ -473,7 +474,8 @@ class HandoverPane(QWidget):
                 self.checklist_widget = None
                 if self.raw.get('source') or self.checklist.items(self.session):
                     self.checklist_widget = ChecklistWidget(self.checklist, self.session,
-                                                           data['evidence'], self.full_summary)
+                                                           data['evidence'], self.full_summary,
+                                                           messages=lambda: self.provider.messages(self.session))
                     full_layout.addWidget(self.checklist_widget)
                 else:
                     full_layout.addWidget(plain('待生成'))
@@ -575,6 +577,14 @@ class HandoverPane(QWidget):
         show()
         dialog.exec()
 
+    def confirm_model_context(self, context):
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle('确认生成服务摘要')
+        confirm.setText('将向配置的模型接口发送所列聊天与必要业务字段，用于概括服务摘要。长数字和邮箱已隐藏，文本可能仍含个人信息；请展开查看实际发送内容。')
+        confirm.setDetailedText(json.dumps(context, ensure_ascii=False, indent=2))
+        confirm.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        return confirm.exec() == QMessageBox.StandardButton.Ok
+
     def generate_model(self):
         root = self.window()
         if getattr(root, 'worker', None) and root.worker.isRunning():
@@ -598,12 +608,7 @@ class HandoverPane(QWidget):
             return
         if getattr(root, 'summary_worker', None) and root.summary_worker.isRunning():
             return
-        confirm = QMessageBox(self)
-        confirm.setWindowTitle('确认生成服务摘要')
-        confirm.setText('将向配置的模型接口发送所列聊天与必要业务字段，用于概括服务摘要。长数字和邮箱已隐藏，文本可能仍含个人信息；请展开查看实际发送内容。')
-        confirm.setDetailedText(json.dumps(context, ensure_ascii=False, indent=2))
-        confirm.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        if confirm.exec() != QMessageBox.StandardButton.Ok:
+        if not self.confirm_model_context(context):
             return
         self.rejected_draft = None
         self.rejected_button.hide()
@@ -615,6 +620,8 @@ class HandoverPane(QWidget):
                 widget.setEnabled(False)
         worker = SummaryWorker(pending, config, root)
         root.summary_worker = worker
+        if hasattr(root, "summary_busy_changed"):
+            root.summary_busy_changed(True)
         worker.ready.connect(self.model_ready)
         worker.failed.connect(self.notice.setText)
         worker.rejected.connect(self.model_rejected)
@@ -626,6 +633,8 @@ class HandoverPane(QWidget):
                 widget = getattr(root, name, None)
                 if widget:
                     widget.setEnabled(True)
+            if hasattr(root, "summary_busy_changed"):
+                root.summary_busy_changed(False)
             worker.deleteLater()
         worker.finished.connect(finish)
         worker.start()

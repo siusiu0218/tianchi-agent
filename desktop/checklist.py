@@ -72,9 +72,10 @@ class ItemDialog(QDialog):
 
 
 class ChecklistWidget(QWidget):
-    def __init__(self, store, session, evidence, parent=None):
+    def __init__(self, store, session, evidence, parent=None, messages=None):
         super().__init__(parent)
         self.store, self.session, self.evidence = store, session, evidence
+        self.messages = messages
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(5)
@@ -87,6 +88,11 @@ class ChecklistWidget(QWidget):
                 part.widget().hide()
                 part.widget().deleteLater()
         self.rows = self.store.items(self.session)
+        if self.rows and self.messages:
+            review = QPushButton('逐条审核建议', self)
+            review.setObjectName('reviewSuggestions')
+            review.clicked.connect(self.review_suggestions)
+            self.layout.addWidget(review)
         if not self.rows:
             self.layout.addWidget(label('暂无待确认事项；客服可手动添加。'))
         for item in self.rows:
@@ -137,6 +143,12 @@ class ChecklistWidget(QWidget):
         add.setFlat(True)
         add.clicked.connect(self.add)
         self.layout.addWidget(add)
+
+    def review_suggestions(self):
+        from desktop.suggestion_review import SuggestionReviewDialog
+        dialog = SuggestionReviewDialog(self, self.store, self.session, self.evidence, self.messages)
+        dialog.exec()
+        self.reload()
 
     def toggle(self, item_id, yes):
         completion_ref = ''

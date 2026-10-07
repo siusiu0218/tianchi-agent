@@ -72,15 +72,16 @@ def clear_layout(layout):
 
 
 class MessageRow(QWidget):
-    def __init__(self, message):
+    def __init__(self, message, customer_view=False):
         super().__init__()
         self.zoom_factor = 1
         self.message = message
-        self.outgoing = message["角色"] != "买家"
+        staff = message["角色"] != "买家"
+        self.outgoing = not staff if customer_view else staff
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
-        self.avatar = text("服" if self.outgoing else "客", "agentAvatar" if self.outgoing else "avatar")
+        self.avatar = text("服" if staff else "客", "agentAvatar" if self.outgoing else "avatar")
         self.avatar.setFixedSize(30, 30)
         self.avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.bubble = QFrame()
@@ -95,7 +96,7 @@ class MessageRow(QWidget):
         if message.get("image_path") or message.get("内容类型") == "图片":
             self.image_notice = text("▧  图片消息 · 暂不可查看", "muted")
             content.addWidget(self.image_notice)
-        self.meta = text(f"{'客服' if self.outgoing else '客户'}  ·  {message['发送时间'][11:16]}", "messageMeta")
+        self.meta = text(f"{'AI 客服' if customer_view and staff else '客服' if staff else '客户'}  ·  {message['发送时间'][11:16]}", "messageMeta")
         self.meta.setAlignment(Qt.AlignmentFlag.AlignRight if self.outgoing else Qt.AlignmentFlag.AlignLeft)
         content.addWidget(self.meta)
         if self.outgoing:
@@ -132,8 +133,9 @@ class MessageRow(QWidget):
 class ChatFeed(QScrollArea):
     """All messages remain available; initial position is the end, with natural bubbles."""
     messagesChanged = Signal()
-    def __init__(self):
+    def __init__(self, customer_view=False):
         super().__init__()
+        self.customer_view = customer_view
         self.zoom_factor = 1
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -183,7 +185,7 @@ class ChatFeed(QScrollArea):
                 divider.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.flow.addWidget(divider, 0, Qt.AlignmentFlag.AlignHCenter)
                 last_day = day
-            row = MessageRow(message)
+            row = MessageRow(message, self.customer_view)
             row.set_zoom(self.zoom_factor)
             self.rows.append(row)
             self.flow.addWidget(row)

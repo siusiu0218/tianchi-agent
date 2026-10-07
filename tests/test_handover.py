@@ -218,7 +218,7 @@ class HandoverTests(unittest.TestCase):
         text = [button.text() for button in self.pane.findChildren(QPushButton)]
         self.assertEqual(text.count('修改接手要点'), 1)
         layout = self.pane.full_summary.layout()
-        headings = [layout.itemAt(index).layout().itemAt(0).widget().text()
+        headings = [layout.itemAt(index).layout().itemAt(1).widget().text()
                     for index in range(0, layout.count(), 2)]
         self.assertEqual(headings, ['客户当前诉求：', '前期沟通情况：',
                                     '建议处理方式：', '待确认内容：'])
