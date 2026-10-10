@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyle, QVBoxLayout, QWidget, QToolButton,
 )
 
+from desktop.typography import BodyText
+
 
 def text(value, name="", selectable=False):
     widget = QLabel(str(value))
@@ -87,10 +89,10 @@ class MessageRow(QWidget):
         self.bubble = QFrame()
         self.bubble.setObjectName("bubbleOut" if self.outgoing else "bubbleIn")
         content = QVBoxLayout(self.bubble)
-        content.setContentsMargins(13, 10, 13, 9)
+        content.setContentsMargins(14, 10, 14, 10)
         content.setSpacing(6)
-        self.body = text(message["message_text"], "message", True)
-        self.body.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.body = BodyText(message["message_text"])
+        self.body.setObjectName("message")
         content.addWidget(self.body)
         self.image_notice = None
         if message.get("image_path") or message.get("内容类型") == "图片":
@@ -113,7 +115,7 @@ class MessageRow(QWidget):
         size = lambda value: round(value * factor)
         self.layout().setSpacing(size(10))
         self.avatar.setFixedSize(size(30), size(30))
-        self.bubble.layout().setContentsMargins(size(13), size(10), size(13), size(9))
+        self.bubble.layout().setContentsMargins(size(14), size(10), size(14), size(10))
         self.bubble.layout().setSpacing(size(6))
 
     def fit_width(self, available):
@@ -321,14 +323,14 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setBrush(QColor("#dfe8ff" if selected else "#eff2f7"))
         painter.drawRoundedRect(avatar, 12, 12)
         painter.setPen(QColor("#617db3"))
-        font = QFont("Segoe UI")
+        font = QFont("Microsoft YaHei UI")
         font.setPixelSize(12)
         painter.setFont(font)
         painter.drawText(avatar, Qt.AlignmentFlag.AlignCenter, "客")
         x = r.left() + 43
         width = r.right() - x - 10
-        font.setPixelSize(12)
-        font.setBold(True)
+        font.setPixelSize(14)
+        font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(QColor("#2d3b52"))
         painter.drawText(QRectF(x, r.top() + 7, width, 20), Qt.AlignmentFlag.AlignLeft, str(index.data(Qt.ItemDataRole.UserRole)))
@@ -339,7 +341,7 @@ class SessionDelegate(QStyledItemDelegate):
         painter.drawText(QRectF(x, r.top() + 31, width, 20), Qt.AlignmentFlag.AlignLeft,
                          painter.fontMetrics().elidedText(meta.get("preview", ""), Qt.TextElideMode.ElideRight, int(width)))
         painter.setPen(QColor("#626d7c"))
-        font.setPixelSize(10)
+        font.setPixelSize(12)
         painter.setFont(font)
         painter.drawText(QRectF(r.right() - 43, r.top() + 9, 38, 15), Qt.AlignmentFlag.AlignRight,
                          meta.get("date", "")[5:])
@@ -458,9 +460,9 @@ class TaskDelegate(QStyledItemDelegate):
         painter.setBrush(QColor("#f0f4ff" if option.state & QStyle.StateFlag.State_Selected else "#ffffff"))
         painter.drawRoundedRect(r, 9, 9)
         level = json.loads(task["payload"])["risk"]["level"]
-        font = QFont("Segoe UI")
-        font.setPixelSize(13)
-        font.setBold(True)
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(14)
+        font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(QColor("#34435b"))
         painter.drawText(r.adjusted(20, 15, -20, -35), Qt.AlignmentFlag.AlignLeft, task["session"])

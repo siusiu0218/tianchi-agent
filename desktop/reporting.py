@@ -5,10 +5,11 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QSize, QRect
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QLineEdit, QTextEdit, QPushButton, QComboBox, QScrollArea)
 from desktop.widgets import ChatFeed
+from desktop.report_selection import MessageSelection
 from desktop.checklist import ReadOnlyChecklist
 from copilot.checklist import ChecklistStore
 from copilot.summary import digest
@@ -55,17 +56,6 @@ class AllChatsDialog(QDialog):
         self.chat.set_messages(messages(self.parent(), session) if session else [])
 
 
-class MessageSelection(QListWidget):
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        width = max(100, self.viewport().width() - 48)
-        for index in range(self.count()):
-            item = self.item(index)
-            bounds = self.fontMetrics().boundingRect(
-                QRect(0, 0, width, 100000), Qt.TextFlag.TextWordWrap, item.text())
-            item.setSizeHint(QSize(width, bounds.height() + 18))
-
-
 class ReportDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -75,8 +65,10 @@ class ReportDialog(QDialog):
         self.setWindowTitle('上报主任 · ' + self.session)
         self.resize(760, 680)
         layout = QVBoxLayout(self)
-        layout.addWidget(plain('勾选需要主任处理的消息，再说明原因。提交后进入主任的待处理列表。'))
+        layout.addWidget(plain('点击消息勾选；按住鼠标上下拖动可批量勾选或取消。填写原因后提交。'))
         self.selection = MessageSelection()
+        self.selection.setObjectName('reportMessages')
+        self.selection.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.selection.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.selection.setWordWrap(True)
         for message in messages(parent, self.session):
@@ -84,8 +76,10 @@ class ReportDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, message)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
-            self.selection.addItem(item)
+            self.selection.add_message(item)
         layout.addWidget(self.selection, 1)
+        self.selection_status = plain('')
+        layout.addWidget(self.selection_status)
         layout.addWidget(plain('上报人'))
         self.operator = QLineEdit(getpass.getuser())
         layout.addWidget(self.operator)
@@ -99,6 +93,23 @@ class ReportDialog(QDialog):
         self.submit_button = QPushButton('确认上报主任')
         self.submit_button.clicked.connect(self.submit)
         layout.addWidget(self.submit_button)
+        self.selection.itemChanged.connect(self.update_submit_state)
+        self.operator.textChanged.connect(self.update_submit_state)
+        self.reason.textChanged.connect(self.update_submit_state)
+        self.update_submit_state()
+
+    def update_submit_state(self):
+        count = sum(self.selection.item(i).checkState() == Qt.CheckState.Checked
+                    for i in range(self.selection.count()))
+        missing = []
+        if not count:
+            missing.append('请勾选要上报的消息')
+        if not self.operator.text().strip():
+            missing.append('请填写上报人')
+        if not self.reason.toPlainText().strip():
+            missing.append('请填写上报原因')
+        self.selection_status.setText(f'已勾选 {count} 条消息' + ('；' + '；'.join(missing) if missing else '，可以提交'))
+        self.submit_button.setEnabled(not missing)
 
     def submit(self):
         chosen = [self.selection.item(i).data(Qt.ItemDataRole.UserRole)

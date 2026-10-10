@@ -26,6 +26,7 @@ from desktop.config import save_settings
 from desktop.theme import STYLE, scaled_style
 from desktop.controls import SoftComboBox as QComboBox
 from desktop.controls import SoftMenu as QMenu
+from desktop.inbox_controls import InboxMenu
 from desktop.navigation import InboxSplitter, MessageMap, SlidingPanel, SessionItem
 from desktop.icons import svg_icon
 from desktop.widgets import ChatFeed, EvidencePanel, MetricCard, SessionDelegate, TaskDelegate, navigation_button
@@ -390,9 +391,9 @@ class MainWindow(QMainWindow):
         for nav in (self.inbox_nav, self.board_nav, self.settings_nav, self.open_button):
             nav.setFixedSize(size(40), size(40))
             nav.setIconSize(QSize(size(20), size(20)))
-        for action, icon in ((self.filter_button, 16), (self.sort_button, 16),
+        for action, icon in ((self.filter_button, 20), (self.sort_button, 20),
                              (self.clear_filters_button, 14)):
-            action.setFixedSize(size(28), size(28))
+            action.setFixedSize(size(36), size(36))
             action.setIconSize(QSize(size(icon), size(icon)))
         for action, width in ((self.risk_evidence, 28), (self.summary_toggle, 30)):
             action.setFixedSize(size(width), size(width))
@@ -426,29 +427,32 @@ class MainWindow(QMainWindow):
         heading.addWidget(self.session_count)
         left_layout.addLayout(heading)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索会话或消息…")
+        self.search.setObjectName("inboxSearch")
+        self.search.setPlaceholderText("搜索会话或消息")
+        self.search.addAction(svg_icon("search", "#777777"), QLineEdit.ActionPosition.LeadingPosition)
+        self.search.setMinimumWidth(0)
         self.search.textChanged.connect(self.filter_sessions)
-        left_layout.addWidget(self.search)
         filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        filter_row.addWidget(self.search, 1)
         self.filter_button = QToolButton()
         self.filter_button.setObjectName("inboxAction")
-        self.filter_button.setFixedSize(28, 28)
-        self.filter_button.setIconSize(QSize(16, 16))
-        self.filter_button.setIcon(svg_icon("list-filter"))
-        self.filter_button.setCheckable(True)
-        self.filter_button.setAccessibleName("展开会话筛选")
+        self.filter_button.setFixedSize(36, 36)
+        self.filter_button.setIconSize(QSize(20, 20))
+        self.filter_button.setIcon(svg_icon("funnel", "#777777"))
+        self.filter_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.filter_button.setAccessibleName("会话筛选")
         self.filter_button.setToolTip("按风险、主任上报状态和图片消息筛选")
-        filter_row.addWidget(self.filter_button)
         self.sort_mode = 'latest'
         self.sort_button = QToolButton()
         self.sort_button.setObjectName("inboxAction")
-        self.sort_button.setFixedSize(28, 28)
-        self.sort_button.setIconSize(QSize(16, 16))
-        self.sort_button.setIcon(svg_icon("arrow-down-wide-narrow"))
+        self.sort_button.setFixedSize(36, 36)
+        self.sort_button.setIconSize(QSize(20, 20))
+        self.sort_button.setIcon(svg_icon("sort-arrows", "#777777"))
         self.sort_button.setAccessibleName("会话排序")
         self.sort_button.setToolTip("排序：最近消息 · 降序（最新在前）")
         self.sort_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(self.sort_button)
+        menu = InboxMenu(self.sort_button)
         group = QActionGroup(menu)
         self.sort_actions = {}
         for title, mode in [('最近消息  ↓', 'recent'),
@@ -461,7 +465,7 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, m=mode, t=title: self.choose_session_sort(m, t))
         self.sort_button.setMenu(menu)
         filter_row.addWidget(self.sort_button)
-        filter_row.addStretch()
+        filter_row.addWidget(self.filter_button)
         self.clear_filters_button = QToolButton()
         self.clear_filters_button.setObjectName("inboxAction")
         self.clear_filters_button.setFixedSize(28, 28)
@@ -470,7 +474,7 @@ class MainWindow(QMainWindow):
         self.clear_filters_button.setToolTip("清除筛选与搜索")
         self.clear_filters_button.setAccessibleName("清除筛选与搜索")
         self.clear_filters_button.clicked.connect(self.clear_session_filters)
-        filter_row.addWidget(self.clear_filters_button)
+        self.clear_filters_button.setParent(left)
         left_layout.addLayout(filter_row)
         self.filter_panel = QWidget()
         filters = QVBoxLayout(self.filter_panel)
@@ -493,8 +497,25 @@ class MainWindow(QMainWindow):
             filters.addWidget(combo)
             combo.currentIndexChanged.connect(self.filter_sessions)
         self.filter_panel.hide()
-        self.filter_button.toggled.connect(self.filter_panel.setVisible)
-        left_layout.addWidget(self.filter_panel)
+        self.filter_panel.setParent(left)
+        self.filter_menu = InboxMenu(self.filter_button)
+        self.filter_actions = []
+        for title, combo in [("风险等级", self.risk_filter), ("主任上报状态", self.report_filter),
+                             ("消息类型", self.image_filter)]:
+            self.filter_menu.addSection(title)
+            group = QActionGroup(self.filter_menu)
+            actions = []
+            for index in range(combo.count()):
+                action = self.filter_menu.addAction(combo.itemText(index))
+                action.setCheckable(True)
+                action.setChecked(index == combo.currentIndex())
+                group.addAction(action)
+                action.triggered.connect(lambda checked=False, c=combo, i=index: c.setCurrentIndex(i))
+                actions.append(action)
+            self.filter_actions.append((combo, actions))
+        self.filter_menu.addSeparator()
+        self.filter_menu.addAction("清除筛选与搜索", self.clear_session_filters)
+        self.filter_button.setMenu(self.filter_menu)
         self.filter_notice = label("", "muted")
         self.filter_notice.hide()
         left_layout.addWidget(self.filter_notice)
@@ -738,7 +759,7 @@ class MainWindow(QMainWindow):
             action.setChecked(key == ('recent' if recent else mode))
         if recent:
             title = '最近消息 · ' + ('升序（最早在前）' if mode == 'oldest' else '降序（最新在前）')
-        self.sort_button.setIcon(svg_icon('arrow-up-narrow-wide' if mode == 'oldest' else 'arrow-down-wide-narrow'))
+        self.sort_button.setIcon(svg_icon('sort-arrows', '#777777'))
         self.sort_button.setToolTip("排序：" + title)
         self.sort_button.setAccessibleName("排序：" + title)
         self.sort_sessions()
@@ -790,7 +811,11 @@ class MainWindow(QMainWindow):
         self.filter_button.setProperty('active', bool(active))
         self.filter_button.style().unpolish(self.filter_button)
         self.filter_button.style().polish(self.filter_button)
-        self.clear_filters_button.setVisible(bool(active or text))
+        self.clear_filters_button.hide()
+        self.search.setClearButtonEnabled(bool(text))
+        for combo, actions in self.filter_actions:
+            for index, action in enumerate(actions):
+                action.setChecked(index == combo.currentIndex())
         current = self.sessions.currentItem()
         notice = "没有符合条件的会话" if not visible else ""
         if current and current.isHidden():

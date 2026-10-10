@@ -15,6 +15,8 @@ from copilot.summary import FIELDS, LOCAL_SOURCE, build_summary, candidates, dig
 from copilot.summary_store import SummaryStore
 from copilot.checklist import ChecklistStore, suggestions
 from desktop.checklist import ChecklistWidget
+from desktop.typography import BodyText
+from desktop.evidence import EvidenceView
 from copilot.agent import assess
 from copilot.llm import ModelConfig
 from copilot.summary_llm import generate_summary, model_context, SummaryValidationError
@@ -428,7 +430,7 @@ class HandoverPane(QWidget):
         self.full_summary = QWidget(self)
         full_layout = QVBoxLayout(self.full_summary)
         full_layout.setContentsMargins(0, 0, 0, 0)
-        full_layout.setSpacing(8)
+        full_layout.setSpacing(10)
         self.full_toggle.toggled.connect(self.full_summary.setVisible)
         self.full_toggle.toggled.connect(lambda yes: self.full_toggle.setText(('▾ ' if yes else '▸ ') + '接手要点'))
         self.layout.addWidget(self.full_toggle)
@@ -462,7 +464,7 @@ class HandoverPane(QWidget):
                 if item.get('conflict'):
                     prefix += '〔纠正需复核〕'
                 lines.append(prefix + item['text'])
-            body = plain('\n'.join(dict.fromkeys(lines)) or
+            body = BodyText('\n'.join(dict.fromkeys(lines)) or
                          ('待生成' if not self.raw.get('source') else '现有记录未显示该项内容，请人工核对。'))
             body.setObjectName('summaryBody')
             body.setTextFormat(Qt.TextFormat.RichText)
@@ -564,15 +566,13 @@ class HandoverPane(QWidget):
             if item['field'] == field:
                 selector.addItem(item['topic'], item)
         layout.addWidget(selector)
-        viewer = QTextEdit()
-        viewer.setReadOnly(True)
+        viewer = EvidenceView(dialog, getattr(self.window(), 'zoom_percent', 100) / 100)
         layout.addWidget(viewer)
         def show():
             item = selector.currentData()
             if not item:
                 return
-            extra = '\n当前系统表述：' + item['generated'] if item.get('conflict') else ''
-            viewer.setPlainText(item['text'] + extra + '\n\n来源依据：\n\n' + '\n\n'.join(r + '\n' + '\n'.join(f'{k}：{v}' for k, v in self.raw['evidence'][r].items()) for r in item['refs']))
+            viewer.set_item(item, self.raw['evidence'])
         selector.currentIndexChanged.connect(show)
         show()
         dialog.exec()

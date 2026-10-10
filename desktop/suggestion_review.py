@@ -24,24 +24,24 @@ class SuggestionReviewDialog(QDialog):
         self.setObjectName('suggestionReview')
         self.setStyleSheet("""
             QDialog#suggestionReview { background:#f5f6f7; }
-            QDialog#suggestionReview QLabel { color:#263238; font-size:13px; }
+            QDialog#suggestionReview QLabel { color:#263238; font-size:14px; }
             QDialog#suggestionReview QLabel#reviewTitle { font-size:20px; font-weight:600; }
             QDialog#suggestionReview QLabel#reviewMuted { color:#78858d; font-size:12px; }
             QDialog#suggestionReview QFrame#reviewCard { background:white; border:1px solid #e4e8eb; border-radius:10px; }
             QDialog#suggestionReview QTextEdit { background:#fafbfc; border:1px solid #e1e6e9; border-radius:7px; padding:10px; font-size:14px; color:#24323a; }
-            QDialog#suggestionReview QComboBox { background:white; border:1px solid #e1e6e9; border-radius:7px; padding:9px; font-size:13px; }
-            QDialog#suggestionReview QPushButton { background:white; border:1px solid #dce3e6; border-radius:6px; padding:9px 14px; font-size:13px; }
+            QDialog#suggestionReview QComboBox { background:white; border:1px solid #e1e6e9; border-radius:7px; padding:9px; font-size:14px; }
+            QDialog#suggestionReview QPushButton { background:white; border:1px solid #dce3e6; border-radius:6px; padding:9px 14px; font-size:14px; }
             QDialog#suggestionReview QPushButton#reviewSave { background:#16865d; color:white; border:0; }
             QDialog#suggestionReview QPushButton#reviewDelete { color:#ae534b; }
             QDialog#suggestionReview QScrollArea { border:0; background:#ededed; }
             QDialog#suggestionReview QWidget#reviewChatCanvas { background:#ededed; }
             QDialog#suggestionReview QFrame#bubbleIn { background:white; border:0; border-radius:7px; }
             QDialog#suggestionReview QFrame#bubbleOut { background:#b6ec8d; border:0; border-radius:7px; }
-            QDialog#suggestionReview QLabel#message { color:#222; font-size:14px; }
-            QDialog#suggestionReview QLabel#messageMeta { color:#64776c; font-size:10px; }
+            QDialog#suggestionReview QTextBrowser#message { color:#202124; font-size:15px; font-weight:400; border:0; padding:0; background:transparent; }
+            QDialog#suggestionReview QLabel#messageMeta { color:#64776c; font-size:12px; }
             QDialog#suggestionReview QLabel#avatar { background:#d7e1eb; color:#50718c; border-radius:6px; font-size:12px; }
             QDialog#suggestionReview QLabel#agentAvatar { background:#d3e6d2; color:#46864b; border-radius:6px; font-size:12px; }
-            QDialog#suggestionReview QLabel#date { color:#999; font-size:11px; background:transparent; }
+            QDialog#suggestionReview QLabel#date { color:#999; font-size:12px; background:transparent; }
             QDialog#suggestionReview QToolButton { border:0; background:transparent; color:#52776b; padding:4px; }
         """)
         layout = QVBoxLayout(self)
