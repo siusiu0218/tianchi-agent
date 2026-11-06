@@ -1,22 +1,22 @@
 # 项目文档导航
 
-这里集中保存项目说明。程序入口和依赖文件保留在项目根目录，具体资料按用途分类。
+首次了解项目请阅读 [作品介绍与运行方式](../README.md)。
 
-## 常用说明
+## 数据与技术参考
 
-- [桌面版使用与更新记录](guides/desktop-guide.md)
+- [数据画像与关联校验](data-profile.md)：固定 MOCK 数据的规模、字段与限制。
+- [字段字典](field-dictionaries/README.md)：工作簿各表的字段说明。
+
+## 历史版本说明
+
+以下材料记录早期版本，功能与测试数量不代表当前桌面版；当前状态以首页说明及对应代码为准。
+
+- [桌面版历史更新记录](guides/desktop-guide.md)
 - [网页版 v0.1 发布指南](guides/release-v0.1.md)
-- [第一版演示说明](first-demo.md)
-- [比赛约束](competition-constraints.md)
-- [数据画像](data-profile.md)
-- [字段字典](field-dictionaries/README.md)
 
-## 文件夹
+## 开发协作
 
-- `guides/`：运行、打包和版本使用说明。
-- `learning/`：结合本项目学习编程的目标与资料。
-- `drafts/`：尚未正式发布的本地草稿，默认不进入 Git。
-- `agents/`：Issue、标签和领域文档等协作约定。
-- `field-dictionaries/`：比赛工作簿的字段解释。
+- `agents/`：Issue、标签和领域文档约定。
+- [开发工作记录](../WORKFLOW.md)：供开发维护使用，包含历史过程与待验证事项。
 
-项目当前进度仍以根目录的 [WORKFLOW.md](../WORKFLOW.md) 为准。
+个人学习笔记、早期比赛研究与规划已移出当前公开文件树；应用源码、测试、字段字典和必要的第三方素材许可证保留。
