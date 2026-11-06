@@ -1,5 +1,6 @@
 """Native UI workflows against temporary records, without live API calls."""
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QWidget, QPush
 
 from copilot.data import DEFAULT_SOURCE, ExcelProvider
 from copilot.store import ReviewStore
+from copilot.summary import digest
 from desktop.config import read_settings, save_settings
 from desktop.window import MainWindow, ReplyDialog, ReviewDialog, TaskDialog
 
@@ -53,6 +55,174 @@ class DesktopTests(unittest.TestCase):
             w.draft.setPlainText('测试回复')
         return ReviewDialog(w, w.result, w.original, w.draft.toPlainText(), w.source)
 
+    def test_sidebar_drag_and_summary_icon_preserve_draft(self):
+        w = self.window
+        self.select('S00268')
+        w.draft.setPlainText('布局切换保留的草稿')
+        split = w.inbox_split
+        split.moveSplitter(0, 1)
+        QTest.qWait(120)
+        self.assertEqual(split.sizes()[0], 0)
+        self.assertTrue(split.handle(1).isVisible())
+        split.moveSplitter(240, 1)
+        QTest.qWait(120)
+        self.assertGreaterEqual(split.sizes()[0], 210)
+        width = split.sizes()[2]
+        for _ in range(3):
+            w.summary_toggle.click()
+            QTest.qWait(300)
+            self.assertTrue(w.summary_panel.isHidden())
+            self.assertTrue(w.risk_badge.isVisible())
+            w.summary_toggle.click()
+            QTest.qWait(300)
+            self.assertAlmostEqual(split.sizes()[2], width, delta=1)
+        split.toggle_list()
+        w.summary_toggle.click()
+        w.resize(1120, 740)
+        w.summary_toggle.click()
+        QTest.qWait(300)
+        self.assertEqual(split.sizes()[0], 0)
+        split.toggle_list()
+        self.assertGreaterEqual(split.sizes()[0], 210)
+        self.select('S00001')
+        self.select('S00268')
+        self.assertEqual(w.draft.toPlainText(), '布局切换保留的草稿')
+
+    def test_message_map_exact_jump_and_session_reset(self):
+        w = self.window
+        self.select('S00268')
+        QTest.qWait(150)
+        self.assertEqual(w.message_map.count(), len(w.chat.messages))
+
+        for index in (0, 3, len(w.chat.messages) - 1):
+            item = w.message_map.item(index)
+            identity = item.data(Qt.ItemDataRole.UserRole)
+            self.assertIn(identity, item.toolTip())
+            w.message_map.locate(item)
+            QTest.qWait(60)
+            self.assertIs(w.chat._highlighted, w.chat.rows[index].bubble)
+            bar = w.chat.verticalScrollBar()
+            expected = min(bar.maximum(), max(0, w.chat.rows[index].y() - 16))
+            self.assertAlmostEqual(bar.value(), expected, delta=2)
+        self.assertFalse(w.chat.jump_to_message('missing-message'))
+        old_id = w.chat.messages[0]['message_id']
+        self.select('S00001')
+        self.assertIsNone(w.chat._highlighted)
+        self.assertFalse(w.chat.jump_to_message(old_id))
+        self.assertEqual(w.message_map.count(), len(w.chat.messages))
+
+    def test_keyboard_zoom_resizes_content_and_keeps_work(self):
+        w = self.window
+        self.select('S00268')
+        w.draft.setPlainText('缩放后保留的草稿')
+        original_row = w.sessions.sizeHintForRow(0)
+        original_font = w.title.font().pixelSize()
+        QTest.keyClick(w, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
+        self.app.processEvents()
+        self.assertEqual(w.zoom_percent, 110)
+        self.assertGreater(w.sessions.sizeHintForRow(0), original_row)
+        self.assertGreater(w.title.font().pixelSize(), original_font)
+        self.assertEqual(w.draft.toPlainText(), '缩放后保留的草稿')
+        self.assertEqual(w.sessions.currentItem().data(Qt.ItemDataRole.UserRole), 'S00268')
+        QTest.keyClick(w, Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier)
+        self.app.processEvents()
+        self.assertEqual(w.zoom_percent, 100)
+        self.assertEqual(w.sessions.sizeHintForRow(0), original_row)
+        w.set_zoom(130)
+        w.adjust_zoom(1)
+        self.assertEqual(w.zoom_percent, 130)
+        QTest.keyClick(w, Qt.Key.Key_0, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(w.zoom_percent, 100)
+        self.assertEqual(w.draft.toPlainText(), '缩放后保留的草稿')
+
+    def test_sorting_preserves_selection_filters_and_draft(self):
+        w = self.window
+        self.select('S00268')
+        w.draft.setPlainText('排序时不改变草稿')
+        revision = w.draft_revision
+        w.risk_filter.setCurrentIndex(w.risk_filter.findData('P0'))
+        def visible_ids():
+            return [w.sessions.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(w.sessions.count()) if not w.sessions.item(i).isHidden()]
+        original = set(visible_ids())
+        for mode in ('latest', 'oldest', 'risk', 'session'):
+            w.set_session_sort(mode, mode)
+            self.assertEqual(set(visible_ids()), original)
+            self.assertEqual(w.sessions.currentItem().data(Qt.ItemDataRole.UserRole), 'S00268')
+            self.assertEqual(w.draft_revision, revision)
+            keys = [w.sessions.item(i).data(Qt.ItemDataRole.UserRole + 2) for i in range(w.sessions.count())]
+            self.assertEqual(keys, sorted(keys, reverse=mode == 'latest'))
+        self.assertEqual(w.draft.toPlainText(), '排序时不改变草稿')
+        self.assertEqual(w.filter_button.text(), '')
+        self.assertEqual(w.sort_button.text(), '')
+
+    def test_summary_slide_has_intermediate_frames_and_reverses(self):
+        w = self.window
+        self.select('S00268')
+        QTest.qWait(100)
+        original = w.inbox_split.sizes()[2]
+        w.summary_toggle.click()
+        QTest.qWait(75)
+        middle = w.inbox_split.sizes()[2]
+        self.assertGreater(middle, 0)
+        self.assertLess(middle, original)
+        self.assertEqual(w.summary_panel.content.width(), original)
+        w.summary_toggle.click()
+        QTest.qWait(320)
+        self.assertFalse(w.summary_panel.animating)
+        self.assertFalse(w.summary_panel.isHidden())
+        self.assertAlmostEqual(w.inbox_split.sizes()[2], original, delta=2)
+        w.summary_toggle.click()
+        QTest.qWait(320)
+        self.assertTrue(w.summary_panel.isHidden())
+        w.summary_toggle.click()
+        QTest.qWait(320)
+        self.assertEqual(w.inbox_split.sizes()[2], original)
+
+    def test_recent_sort_single_action_toggles_direction(self):
+        w = self.window
+        self.select('S00268')
+        w.draft.setPlainText('切换升降序时保留')
+        action = w.sort_actions['recent']
+        self.assertEqual(len(w.sort_button.menu().actions()), 3)
+        self.assertEqual(w.sort_mode, 'latest')
+        for expected, arrow in [('oldest', '↑'), ('latest', '↓'), ('oldest', '↑')]:
+            action.trigger()
+            self.assertEqual(w.sort_mode, expected)
+            self.assertIn(arrow, action.text())
+            self.assertTrue(action.isChecked())
+            keys = [w.sessions.item(i).data(Qt.ItemDataRole.UserRole + 2) for i in range(w.sessions.count())]
+            self.assertEqual(keys, sorted(keys, reverse=expected == 'latest'))
+        w.sort_actions['risk'].trigger()
+        action.trigger()
+        self.assertEqual(w.sort_mode, 'latest')
+        self.assertEqual(w.draft.toPlainText(), '切换升降序时保留')
+        self.assertEqual(w.result['case']['session_id'], 'S00268')
+
+    def test_layout_preserves_reading_anchor_and_risk_sources(self):
+        w = self.window
+        self.select('S00268')
+        QTest.qWait(150)
+        row = w.chat.rows[2]
+        w.chat.stop_following()
+        w.chat.verticalScrollBar().setValue(row.y())
+        original = w.chat.verticalScrollBar().value()
+        w.summary_toggle.click()
+        QTest.qWait(300)
+        w.summary_toggle.click()
+        QTest.qWait(300)
+        self.assertAlmostEqual(w.chat.verticalScrollBar().value(), original, delta=3)
+        def inspect(dialog):
+            from PySide6.QtWidgets import QTextBrowser
+            content = dialog.findChild(QTextBrowser).toPlainText()
+            self.assertIn('P0', content)
+            for evidence in w.result['risk']['evidence']:
+                self.assertIn(evidence['message_id'], content)
+            return 0
+        w.summary_toggle.click()
+        with patch.object(QDialog, 'exec', inspect):
+            w.risk_evidence.click()
+
     def fill_review(self, dialog):
         dialog.operator.setText("测试审核员")
         dialog.owner.setText("测试负责人")
@@ -77,13 +247,60 @@ class DesktopTests(unittest.TestCase):
                    if not self.window.sessions.item(i).isHidden()]
         self.assertEqual(len(visible), 1)
 
+    def test_inbox_filters_combine_reset_and_preserve_draft(self):
+        w = self.window
+        self.select('S00268')
+        w.draft.setPlainText('筛选期间保留的草稿')
+        w.risk_filter.setCurrentIndex(w.risk_filter.findData('P1'))
+        self.assertTrue(w.sessions.currentItem().isHidden())
+        self.assertEqual(w.result['case']['session_id'], 'S00268')
+        self.assertEqual(w.draft.toPlainText(), '筛选期间保留的草稿')
+        w.search.setText('S00001')
+        w.image_filter.setCurrentIndex(w.image_filter.findData('image'))
+        shown = [w.sessions.item(i).data(Qt.ItemDataRole.UserRole)
+                 for i in range(w.sessions.count()) if not w.sessions.item(i).isHidden()]
+        self.assertEqual(shown, ['S00001'])
+        w.image_filter.setCurrentIndex(w.image_filter.findData('text'))
+        self.assertEqual(w.session_count.text(), '0')
+        self.assertIn('没有符合条件', w.filter_notice.text())
+        w.clear_session_filters()
+        self.assertEqual(int(w.session_count.text()), w.sessions.count())
+        self.assertEqual(w.draft.toPlainText(), '筛选期间保留的草稿')
+        self.assertFalse(w.filter_notice.isVisible())
+        w.risk_filter.setCurrentIndex(w.risk_filter.findData('待核实'))
+        self.assertGreater(int(w.session_count.text()), 0)
+
+    def test_inbox_report_filter_refreshes_after_status_changes(self):
+        w = self.window
+        w.report_filter.setCurrentIndex(w.report_filter.findData('pending'))
+        self.assertEqual(w.session_count.text(), '0')
+        self.select('S00001')
+        w.reports.submit(token='filter-check', session='S00001', operator='验收',
+                         reason='核对换货', messages=self.provider.messages('S00001')[:1],
+                         risk=w.result['risk'])
+        w.refresh_board()
+        self.assertEqual(w.session_count.text(), '1')
+        report = w.reports.reports()[0]
+        w.reports.update(report, operator='验收', note='已核对', status='已处理')
+        w.refresh_board()
+        self.assertEqual(w.session_count.text(), '0')
+        w.report_filter.setCurrentIndex(w.report_filter.findData('reported'))
+        self.assertEqual(w.session_count.text(), '1')
+
     def test_business_snapshots_refresh_without_replacing_summary(self):
         self.select('S00268')
+        folds = [button.text() for button in self.window.facts.findChildren(QPushButton, 'fold')]
+        self.assertNotIn('▸  订单与物流', folds)
+        self.assertNotIn('▾  订单与物流', folds)
+        order_toggle = next(button for button in self.window.facts.findChildren(QPushButton, 'fold')
+                            if '关联订单' in button.text())
+        self.assertTrue(order_toggle.isChecked())
+        self.assertTrue(order_toggle.parentWidget().layout().itemAt(1).widget().isVisible())
         pane = self.window.facts.handover
         before = pane.raw
-        snapshot = [{'工单类别': '测试快照', '工单号': 'synthetic', '任务状态': '新快照状态'}]
-        with patch.object(self.provider, 'ticket_snapshot', return_value=snapshot):
-            self.window.facts.refresh_business(self.window.result, self.provider)
+        snapshot = [{'订单号': 'synthetic', '订单状态': '新快照状态'}]
+        result = dict(self.window.result, case=dict(self.window.result['case'], orders=snapshot))
+        self.window.facts.refresh_business(result, self.provider)
         self.app.processEvents()
         texts = [w.text() for w in self.window.facts.findChildren(QLabel)]
         self.assertIn('新快照状态', texts)
@@ -100,7 +317,7 @@ class DesktopTests(unittest.TestCase):
         persisted = ReviewStore(self.root / "reviews.sqlite3")
         self.assertEqual(len(persisted.history("S00268")), 1)
         self.window.refresh_board()
-        self.assertEqual(self.window.task_list.count(), 1)
+        self.assertEqual(self.window.task_list.count(), 0)  # Legacy reviews are not staff reports.
         task = persisted.tasks()[0]
         first, stale = TaskDialog(self.window, task), TaskDialog(self.window, task)
         for form in (first, stale):
@@ -186,6 +403,29 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(empty.reply_button.isEnabled())
         empty.close()
 
+    def test_summary_after_switch_does_not_reuse_deleted_worker(self):
+        self.window.settings.update(base_url='http://localhost:9000/v1', model='test')
+        self.window.api_key = 'test-key'
+        self.select('S00268')
+        with (patch('desktop.handover.generate_summary',
+                    side_effect=lambda summary, config: dict(summary, source='模型概括 · 待人工核对')),
+              patch.object(QMessageBox, 'exec', return_value=QMessageBox.StandardButton.Ok)):
+            self.window.facts.handover.update_button.click()
+            worker = self.window.summary_worker
+            worker.wait(3000)
+            self.app.processEvents()
+        self.select('S00001')
+        self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        errors = []
+        try:
+            with (patch.object(sys, 'excepthook', side_effect=lambda kind, error, trace: errors.append(str(error))),
+                  patch.object(QMessageBox, 'exec', return_value=QMessageBox.StandardButton.Cancel)):
+                self.window.facts.handover.update_button.click()
+                self.app.processEvents()
+        finally:
+            self.window.summary_worker = None
+        self.assertEqual(errors, [])
+
     def test_settings_do_not_persist_key(self):
         save_settings({"data_path": str(DEFAULT_SOURCE), "api_key": "never-save-this"}, self.root)
         self.assertNotIn("never-save-this", (self.root / "settings.json").read_text(encoding="utf-8"))
@@ -221,6 +461,52 @@ class DesktopTests(unittest.TestCase):
             self.assertIn('客服修改后的正文', self.window.chat.toPlainText())
             self.assertIsNone(self.store.composer_draft(self.window.draft_scope(), session))
 
+    def test_reports_are_explicit_persistent_and_independent_of_replies(self):
+        from desktop.reporting import ReportDialog, HandleReportDialog, AllChatsDialog
+        from copilot.reports import ReportStore
+        self.window.draft.setPlainText('普通回复')
+        self.window.reply_button.click()
+        self.assertEqual(self.window.reports.reports(), [])
+        self.assertEqual(self.store.tasks(), [])
+        browser = AllChatsDialog(self.window)
+        self.assertEqual(browser.sessions.count(), len(self.provider.sessions()))
+        browser.sessions.setCurrentText('S00001')
+        self.assertIn(self.provider.messages('S00001')[0]['message_text'], browser.chat.toPlainText())
+        self.assertEqual(self.window.reports.reports(), [])
+        browser.close()
+        dialog = ReportDialog(self.window)
+        dialog.submit()
+        self.assertEqual(self.window.reports.reports(), [])
+        dialog.selection.item(0).setCheckState(Qt.CheckState.Checked)
+        dialog.reason.setPlainText('需要主任核实')
+        dialog.submit()
+        dialog.submit()
+        persisted = ReportStore(ReviewStore(self.store.path))
+        reports = persisted.reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(len(json.loads(reports[0]['payload'])['messages']), 1)
+        self.assertEqual(self.window.task_list.count(), 1)
+        self.assertIn('1', self.window.board_nav.text())
+        self.select('S00001')
+        other = ReportDialog(self.window)
+        self.assertTrue(all(other.selection.item(i).checkState() == Qt.CheckState.Unchecked
+                            for i in range(other.selection.count())))
+        other.close()
+        handler = HandleReportDialog(self.window, reports[0])
+        handler.status.setCurrentText('已处理')
+        handler.note.setText('已核实并回复客服')
+        handler.save()
+        self.assertEqual(persisted.reports()[0]['status'], '已处理')
+        self.assertEqual(self.window.task_list.count(), 0)
+        self.assertNotIn('1', self.window.board_nav.text())
+        with self.assertRaisesRegex(ValueError, '已被其他操作更新'):
+            persisted.update(reports[0], operator='主任', note='过期操作', status='处理中')
+        self.assertEqual(len(persisted.events(reports[0]['id'])), 2)
+        self.window.status_filter.setCurrentText('全部')
+        self.assertEqual(self.window.task_list.count(), 1)
+        for text in [x.text() for x in self.window.facts.findChildren(QPushButton)]:
+            self.assertNotIn('工单', text)
+
     def prepare_model_result(self):
         w = self.window
         w.model_context_session = w.result['case']['session_id']
@@ -228,7 +514,18 @@ class DesktopTests(unittest.TestCase):
         w.model_revision = w.draft_revision
         w.model_draft = w.draft.toPlainText()
         w.model_messages = self.store.simulated_messages(w.model_context_session)
+        w.model_summary_fingerprint = digest(w.facts.handover.reply_summary())
         return {'status': 'model', 'text': '新的 AI 回复', 'notice': '建议'}
+
+    def test_reply_rejected_when_human_summary_changes_during_generation(self):
+        pane = self.window.facts.handover
+        pane.update_local()
+        output = self.prepare_model_result()
+        item = pane.displayed['items'][0]
+        pane.ledger.correct(pane.session, item, '已核对的摘要修订', '测试员', '核对原文')
+        self.window.model_completed(output)
+        self.assertEqual(self.window.draft.toPlainText(), '')
+        self.assertIn('未采用旧建议', self.window.statusBar().currentMessage())
 
     def test_ai_empty_fill_preview_cancel_and_accept(self):
         output = self.prepare_model_result()

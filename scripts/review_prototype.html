@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>共情副驾 · 审核样例</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f6f8;color:#203044;font:16px/1.65 system-ui,"Microsoft YaHei",sans-serif}header{background:#183c43;color:white;padding:22px 4vw}h1{font-size:25px;margin:0}header p{margin:6px 0 0;color:#d7e9ea}main{max-width:1400px;margin:24px auto;padding:0 24px}nav{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}button{cursor:pointer;border:1px solid #b6c5ca;border-radius:6px;background:white;padding:9px 14px;color:#203044;font:inherit}button[aria-pressed=true],button.primary{background:#21646b;color:white}button:disabled{opacity:.45;cursor:default}.columns{display:grid;grid-template-columns:1fr 1.15fr;gap:22px}.panel,.item{background:white;border:1px solid #dce2e6;border-radius:9px;padding:18px;margin-bottom:14px}h2{font-size:20px;margin:0 0 12px}h3{font-size:17px;margin:0 0 6px}.muted{color:#5b6a77;font-size:14px}.warning{background:#fff1d9;padding:10px 14px;border-left:4px solid #b97916;margin-bottom:16px}.message{border-bottom:1px solid #e2e7ea;padding:12px 0;white-space:pre-wrap}.tag{font-size:13px;color:#815214;background:#fff1d9;padding:2px 7px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}textarea{font:inherit;color:inherit;width:100%;min-height:83px;border:1px solid #a8bac1;border-radius:6px;padding:10px}input{font:inherit;width:100%;padding:8px;border:1px solid #a8bac1;border-radius:5px}blockquote{margin:8px 0;padding:8px 12px;background:#f1f5f6;border-left:3px solid #99b6be;white-space:pre-wrap}details{margin-top:8px}summary{cursor:pointer}#notice{color:#8b431c;min-height:28px}.status{font-weight:600;color:#21646b}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:block}.footer{padding:16px 0 35px}@media(max-width:850px){.columns{grid-template-columns:1fr}}
+</style>
+<header><h1>共情副驾 · 审核样例</h1><p>先看原话，再决定保留、修改或删除建议。</p></header>
+<main><div class="warning">本地实验样例：使用已保存的模型结果，不调用模型、不发送客户消息。编辑仅保留在当前页面，未记录的编辑刷新会清空；聊天中已确认的意见会载入，下载可选。</div>
+<nav id="cases" aria-label="选择案例"></nav><div id="meta"></div>
+<div class="columns"><section class="panel"><h2>① 客户原话与上下文</h2><div id="source"></div></section>
+<section><h2>② 逐条审核建议</h2><p class="muted">以下都是客服内部核实事项，不是可直接发给客户的回复。修改后需重新点击保留或删除。</p><div id="items"></div></section></div>
+<section class="panel"><h2>③ 本次审核结果</h2><div id="progress" class="status" role="status"></div><pre id="preview"></pre>
+<div class="actions"><button id="export" class="primary">下载当前案例审核记录</button><button id="reset">恢复初始审核状态</button></div><div id="notice" role="status"></div>
+<p class="muted">下载的是本地审核副本，附原始建议、引用、修改和来源指纹，不会改写历史结果。来源有变化时应重新载入并审核，旧记录不能沿用。</p></section></main>
+<script>
+'use strict';
+const cases=__CASE_DATA__;
+let active=0;
+const fresh=c=>c.items.map((i,n)=>({text:i.text,decision:c.chat_review?.decisions[n]||'pending',reason:c.chat_review?.note||''}));
+const states=cases.map(fresh);
+const $=id=>document.getElementById(id);
+function element(tag,text,parent,cls){const n=document.createElement(tag);n.textContent=text;if(cls)n.className=cls;if(parent)parent.append(n);return n;}
+function update(){const c=cases[active],s=states[active],count=s.filter(x=>x.decision!=='pending').length;
+ $('progress').textContent=`已审核 ${count} / ${s.length} 条 · ${count===s.length?'本案例逐条审核已完成':'仍有待审核项'}`;
+ $('preview').textContent=s.filter(x=>x.decision==='keep').map(x=>'• '+x.text).join('\n')||'尚未保留任何事项。';
+ $('export').disabled=count!==s.length;
+ document.querySelectorAll('[data-state]').forEach(n=>{n.textContent=(c.items[Number(n.dataset.state)].suppressed?{pending:'待审核',keep:'保留为内部核实事项',drop:'已确认不再补问'}:{pending:'待审核',keep:'已保留',drop:'已删除'})[s[Number(n.dataset.state)].decision];});
+}
+function render(){const c=cases[active],s=states[active];$('notice').textContent='';$('cases').replaceChildren();
+ cases.forEach((x,i)=>{const b=element('button',x.title,$('cases'));b.setAttribute('aria-pressed',String(i===active));b.onclick=()=>{active=i;render();};});
+ $('meta').replaceChildren();element('h2',c.title,$('meta'));element('p',`${c.synthetic?'合成边界案例':'比赛会话快照'} · ${c.id} · 截止：${c.source.cutoff||'仅以下给定消息'}`,$('meta'),'muted');
+ if(c.chat_review)element('p','已载入你在聊天中确认的审核意见：重复补问不再询问，其余事项保留。页面后续修改尚未记录。',$('meta'),'status');
+ if(c.source.context.risk_level==='P0')element('div','P0：消费者报告不适，须优先人工核实。修改或删除建议不会取消此风险提示。',$('meta'),'warning');
+ $('source').replaceChildren();for(const m of c.source.context.messages){const box=element('div','',$('source'),'message');element('strong',`${m.ref} · ${m.role}`,box);element('div',m.text,box);}
+ element('h3','系统已知与缺口',$('source'));for(const x of c.source.context.system_sources)element('p',`${x.ref}：${x.text}`,$('source'),'muted');
+ $('items').replaceChildren();c.items.forEach((item,i)=>{const card=element('article','',$('items'),'item');element('h3',item.kind,card);const status=element('span','',card,'status');status.dataset.state=i;
+ if(item.suppressed){element('p','系统建议不再补问：原话中已有明确回答。仍需人工判断。',card,'tag');for(const e of item.answer_evidence)element('blockquote',`${e.ref}：${e.quote}`,card);}
+ const label=element('label','可修改的核实事项',card),edit=element('textarea','',label);edit.value=s[i].text;edit.setAttribute('aria-label',`事项 ${i+1}`);edit.oninput=()=>{s[i].text=edit.value;s[i].decision='pending';update();};
+ const details=element('details','',card);element('summary','查看原始建议及引用依据',details);element('p',item.text,details);for(const e of item.evidence)element('blockquote',`${e.ref}：${e.quote}`,details);
+ const reasonLabel=element('label',item.suppressed?'如仍需保留内部核实事项，请说明原因（不会向客户提问）':'审核备注（选填）',card,'muted'),reason=element('input','',reasonLabel);reason.value=s[i].reason;reason.setAttribute('aria-label',`备注 ${i+1}`);reason.oninput=()=>{s[i].reason=reason.value;s[i].decision='pending';update();};
+ const actions=element('div','',card,'actions');for(const [value,text] of [['keep',item.suppressed?'仍需内部核实':'保留'],['drop',item.suppressed?'已有回答，不再补问':'删除'],['pending','撤销决定']]){const b=element('button',text,actions);b.onclick=()=>{if(value==='keep'&&(!s[i].text.trim()||(item.suppressed&&!s[i].reason.trim()))){$('notice').textContent='保留事项不能留空；保留被拦事项作内部核实时必须填写理由。';return;}$('notice').textContent='';s[i].decision=value;update();};}
+ });update();}
+ $('reset').onclick=()=>{states[active]=fresh(cases[active]);render();};
+ $('export').onclick=()=>{const c=cases[active],s=states[active];if(s.some(x=>x.decision==='pending'))return;
+ const record={prototype:true,case_id:c.id,synthetic:c.synthetic,source_sha256:c.source_sha256,source:c.source,reviewed_at:new Date().toISOString(),automatic_reply_allowed:false,review_scope:'当前快照的人工逐条选择，不证明业务执行或医学判断',items:c.items.map((x,i)=>({original:x,...s[i]}))};
+ const blob=new Blob([JSON.stringify(record,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`review-${c.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);$('notice').textContent='已请求浏览器下载审核副本；请在下载列表确认文件。';};
+ render();
+</script></html>

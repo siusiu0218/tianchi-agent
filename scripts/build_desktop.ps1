@@ -9,7 +9,7 @@ $originalPath = $env:PATH
 try {
     # Do not collect unrelated DLLs from other applications on the host PATH.
     $env:PATH = "$projectRoot\.venv\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
-    & $python -m PyInstaller --noconfirm --clean --windowed --onedir --name EmpathyCopilot --icon "$assetRoot\icon.ico" --add-data "$assetRoot;desktop-assets" --paths $projectRoot --distpath release\desktop --workpath .scratch\desktop-build --specpath .scratch --exclude-module streamlit --exclude-module pyarrow --exclude-module matplotlib --exclude-module tkinter desktop_entry.py
+    & $python -m PyInstaller --noconfirm --clean --windowed --onedir --name EmpathyCopilot --icon "$assetRoot\icon.ico" --add-data "$assetRoot;desktop-assets" --add-data "$projectRoot\desktop\assets;desktop/assets" --paths $projectRoot --distpath release\desktop --workpath .scratch\desktop-build --specpath .scratch --exclude-module streamlit --exclude-module pyarrow --exclude-module matplotlib --exclude-module tkinter desktop_entry.py
 }
 finally { $env:PATH = $originalPath }
 if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed.' }

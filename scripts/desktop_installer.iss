@@ -1,7 +1,7 @@
 [Setup]
 AppId=EmpathyCopilotDesktop
 AppName=共情副驾
-AppVersion=0.5.2
+AppVersion=0.6.4
 DefaultDirName={localappdata}\Programs\EmpathyCopilot
 DefaultGroupName=共情副驾
 PrivilegesRequired=lowest

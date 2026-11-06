@@ -60,6 +60,24 @@ class SummaryStore:
             db.execute('INSERT INTO handover_edits(scope,session,item,created,actor,reason,original,edited,source_hash) VALUES(?,?,?,?,?,?,?,?,?)',
                        (self.namespace, session, item['id'], self.now(), actor.strip(), reason.strip(), item['text'], value.strip(), item['source_hash']))
 
+    def correct_many(self, session, changes, actor, reason):
+        """Apply one review of several handover items as a single transaction."""
+        if not changes or not actor.strip() or not reason.strip() or any(not value.strip() for _, value in changes):
+            raise ValueError('请填写修改内容、操作人和修改说明。')
+        if len({item['id'] for item, _ in changes}) != len(changes):
+            raise ValueError('同一事项不能重复修改。')
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            for item, value in changes:
+                latest = db.execute('SELECT id FROM handover_edits WHERE scope=? AND session=? AND item=? ORDER BY id DESC LIMIT 1',
+                                    (self.namespace, session, item['id'])).fetchone()
+                expected = item.get('correction', {}).get('id')
+                if (latest['id'] if latest else None) != expected:
+                    raise ValueError('接手要点已被修改，请重新打开后再保存。')
+            for item, value in changes:
+                db.execute('INSERT INTO handover_edits(scope,session,item,created,actor,reason,original,edited,source_hash) VALUES(?,?,?,?,?,?,?,?,?)',
+                           (self.namespace, session, item['id'], self.now(), actor.strip(), reason.strip(), item['text'], value.strip(), item['source_hash']))
+
     def apply(self, session, summary):
         result = copy.deepcopy(summary)
         edits = {r['item']: r for r in self.history(session)}

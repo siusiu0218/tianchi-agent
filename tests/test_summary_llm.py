@@ -7,11 +7,59 @@ from requests import HTTPError, Timeout
 
 from copilot.llm import ModelConfig
 from copilot.summary import build_summary, FIELDS
-from copilot.summary_llm import generate_summary, model_context
+from copilot.summary_llm import generate_summary, model_context, _check_current_request_state, SummaryValidationError
 from test_summary import case
 
 
 class SemanticSummaryTests(unittest.TestCase):
+    def test_current_request_cannot_revive_confirmed_missing_goods_or_refund(self):
+        goods = build_summary([case(texts=[
+            ('买家', '包裹没收到货'), ('客服', '我去核实'), ('买家', '收到了，谢谢'),
+        ])])
+        money = build_summary([case(texts=[
+            ('买家', '退款咋还没到账'), ('客服', '退款已原路退回'), ('买家', '哦哦收到了，谢谢'),
+        ])])
+        with self.assertRaisesRegex(ValueError, '已确认收货'):
+            _check_current_request_state([{'field': '诉求', 'text': '要求核实未收到货原因'}], goods)
+        with self.assertRaisesRegex(ValueError, '已确认收到退款'):
+            _check_current_request_state([{'field': '诉求', 'text': '咨询退款为何仍未到账'}], money)
+        _check_current_request_state([{'field': '诉求', 'text': '当前无新增诉求；已收到款'}], money)
+        partial = build_summary([case(texts=[
+            ('买家', '包裹没收到货'), ('客服', '先发补偿券并继续查货'), ('买家', '券收到了，货还没到'),
+        ])])
+        _check_current_request_state([{'field': '诉求', 'text': '货还没收到，继续等待查找'}], partial)
+
+    def test_conditional_agent_options_are_not_buyer_selection(self):
+        waiting = build_summary([case(texts=[
+            ('买家', '货没收到'), ('客服', '若确认丢失可以补发或退款'), ('买家', '那等你们回复'),
+        ])])
+        with self.assertRaisesRegex(ValueError, '客户未选择'):
+            _check_current_request_state([{'field': '诉求', 'text': '接受客服补发或退款方案'}], waiting)
+        _check_current_request_state([{'field': '诉求', 'text': '等待客服核查后回复'}], waiting)
+
+    @patch('copilot.summary_llm.requests.post')
+    def test_stale_refund_request_is_retried_with_same_sources(self, post):
+        summary = build_summary([case(texts=[
+            ('买家', '退款咋还没到账'), ('客服', '退款已原路退回'), ('买家', '哦哦收到了，谢谢'),
+        ])])
+        summary['risk'] = {'level': 'P3', 'evidence': []}
+        valid = {'items': [
+            {'field': '经过概述', 'topic': '退款经过', 'text': '先询问退款，后确认收到。', 'refs': ['e0', 'e2']},
+            {'field': '诉求', 'topic': '退款结果', 'text': '当前无新增诉求；客户确认已收到退款。', 'refs': ['e2']},
+            {'field': '待解决', 'topic': '结束核对', 'text': '现有记录未显示新增待办。', 'refs': ['e2']},
+            {'field': '建议', 'topic': '结束核对', 'action': 'close_review', 'refs': ['e2']},
+        ]}
+        stale = copy.deepcopy(valid)
+        stale['items'][1]['text'] = '咨询退款为何仍未到账。'
+        stale['items'][1]['refs'] = ['e0']
+        post.side_effect = [self.response(stale), self.response(valid)]
+
+        result = generate_summary(summary, self.config)
+
+        self.assertEqual(post.call_count, 2)
+        self.assertIn('客户已确认收到退款', post.call_args.kwargs['json']['messages'][-1]['content'])
+        self.assertIn('当前无新增诉求', next(i['text'] for i in result['items'] if i['field'] == '诉求'))
+
     def setUp(self):
         self.summary = build_summary([case()])
         self.summary['risk'] = {'level': 'P0', 'evidence': []}
@@ -162,6 +210,7 @@ class SemanticSummaryTests(unittest.TestCase):
         self.assertEqual({item['field'] for item in result['items']}, set(FIELDS))
         self.assertIn('Expecting value', post.call_args.kwargs['json']['messages'][-1]['content'])
 
+
     @patch('copilot.summary_llm.requests.post')
     def test_two_invalid_outputs_stop_without_filling_missing_refs(self, post):
         self.output['items'][-1]['refs'] = []
@@ -173,6 +222,22 @@ class SemanticSummaryTests(unittest.TestCase):
 
         self.assertEqual(post.call_count, 2)
         self.assertEqual(self.summary, before)
+
+    @patch('copilot.summary_llm.requests.post')
+    def test_rejected_amount_keeps_draft_reason_and_cited_sources(self, post):
+        invalid = copy.deepcopy(self.output)
+        invalid['items'][1]['text'] = '等待40元到账。'
+        invalid['items'][1]['refs'] = ['e0']
+        post.return_value = self.response(invalid)
+
+        with self.assertRaises(SummaryValidationError) as caught:
+            generate_summary(self.summary, self.config)
+
+        self.assertIn('诉求 / 换货', str(caught.exception))
+        self.assertIn('40', str(caught.exception))
+        self.assertEqual(json.loads(caught.exception.draft), invalid)
+        self.assertEqual(caught.exception.sources[0]['ref'], 'e0')
+        self.assertEqual(post.call_count, 2)
 
     @patch('copilot.summary_llm.requests.post')
     def test_http_and_network_failures_are_not_retried(self, post):

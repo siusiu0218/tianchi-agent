@@ -1,0 +1,9 @@
+Lucide SVG assets (ISC; see LUCIDE-LICENSE.txt):
+messages-square.svg: https://lucide.dev/icons/messages-square
+list-filter.svg: https://lucide.dev/icons/list-filter
+arrow-down-wide-narrow.svg: https://lucide.dev/icons/arrow-down-wide-narrow
+arrow-up-narrow-wide.svg: https://lucide.dev/icons/arrow-up-narrow-wide
+x.svg: https://lucide.dev/icons/x
+Downloaded 2026-09-29 from https://github.com/lucide-icons/lucide/tree/main/icons
+Source SVGs are unchanged. desktop/icons.py applies application colors and
+a rounded background to messages-square for the local prototype's brand mark.
